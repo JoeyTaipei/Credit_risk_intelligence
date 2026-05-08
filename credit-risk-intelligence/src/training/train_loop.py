@@ -12,7 +12,7 @@ import pandas as pd
 from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
-from src.data.preprocess import clean_tabular, engineer_tabular_features
+from src.data.preprocess import clean_tabular, create_synthetic_time_series, engineer_tabular_features
 from src.models.xgb_baseline import predict, train_xgb_baseline
 from src.utils.shap_visualizer import plot_shap_summary, plot_shap_waterfall
 
@@ -127,14 +127,143 @@ def run_xgb_stage() -> tuple[dict[str, float], dict[str, float], list[str]]:
     return val_metrics, test_metrics, top_features
 
 
+def run_lstm_stage() -> float:
+    """Run the Day 2 LSTM encoder training stage.
+
+    Returns:
+        Final validation ROC-AUC.
+    """
+    import mlflow
+    import torch
+    import torch.nn as nn
+    from sklearn.metrics import roc_auc_score
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from src.models.lstm_encoder import LSTMEncoder
+
+    train_path = PROCESSED_DIR / "train.parquet"
+    val_path = PROCESSED_DIR / "val.parquet"
+    if not train_path.exists() or not val_path.exists():
+        raise FileNotFoundError(
+            f"Missing processed splits: expected {train_path} and {val_path}"
+        )
+
+    torch.manual_seed(42)
+    train_df = pd.read_parquet(train_path)
+    val_df = pd.read_parquet(val_path)
+
+    X_train = torch.FloatTensor(create_synthetic_time_series(train_df))
+    y_train = torch.FloatTensor(train_df[TARGET_COL].to_numpy()).view(-1, 1)
+    X_val = torch.FloatTensor(create_synthetic_time_series(val_df))
+    y_val = torch.FloatTensor(val_df[TARGET_COL].to_numpy()).view(-1, 1)
+
+    train_loader = DataLoader(
+        TensorDataset(X_train, y_train),
+        batch_size=256,
+        shuffle=True,
+    )
+    val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=256, shuffle=False)
+
+    encoder = LSTMEncoder(input_size=4, embedding_dim=32)
+    head = nn.Linear(32, 1)
+    optimizer = torch.optim.Adam(
+        list(encoder.parameters()) + list(head.parameters()),
+        lr=1e-3,
+    )
+    criterion = nn.BCEWithLogitsLoss()
+
+    best_val_loss = float("inf")
+    best_state = encoder.state_dict()
+    epochs_without_improvement = 0
+    final_val_auc = 0.0
+
+    with mlflow.start_run():
+        mlflow.log_params(
+            {
+                "stage": "lstm",
+                "batch_size": 256,
+                "epochs": 20,
+                "patience": 5,
+                "learning_rate": 1e-3,
+            }
+        )
+
+        for epoch in range(1, 21):
+            encoder.train()
+            head.train()
+            train_loss_total = 0.0
+            train_examples = 0
+
+            for batch_x, batch_y in train_loader:
+                optimizer.zero_grad()
+                logits = head(encoder(batch_x))
+                loss = criterion(logits, batch_y)
+                loss.backward()
+                optimizer.step()
+
+                batch_size = batch_x.size(0)
+                train_loss_total += loss.item() * batch_size
+                train_examples += batch_size
+
+            train_loss = train_loss_total / train_examples
+
+            encoder.eval()
+            head.eval()
+            val_loss_total = 0.0
+            val_examples = 0
+            val_logits: list[torch.Tensor] = []
+            with torch.no_grad():
+                for batch_x, batch_y in val_loader:
+                    logits = head(encoder(batch_x))
+                    loss = criterion(logits, batch_y)
+                    batch_size = batch_x.size(0)
+                    val_loss_total += loss.item() * batch_size
+                    val_examples += batch_size
+                    val_logits.append(logits)
+
+            val_loss = val_loss_total / val_examples
+            val_prob = torch.sigmoid(torch.cat(val_logits)).cpu().numpy().ravel()
+            final_val_auc = float(roc_auc_score(y_val.numpy().ravel(), val_prob))
+
+            mlflow.log_metric("train_loss", train_loss, step=epoch)
+            mlflow.log_metric("val_loss", val_loss, step=epoch)
+            mlflow.log_metric("val_auc", final_val_auc, step=epoch)
+
+            print(
+                f"[INFO] epoch={epoch} train_loss={train_loss:.4f} "
+                f"val_loss={val_loss:.4f} val_auc={final_val_auc:.4f}"
+            )
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {
+                    name: value.detach().cpu().clone()
+                    for name, value in encoder.state_dict().items()
+                }
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= 5:
+                    print(f"[INFO] Early stopping at epoch {epoch}.")
+                    break
+
+    encoder.load_state_dict(best_state)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    torch.save(encoder.state_dict(), PROCESSED_DIR / "lstm_encoder.pt")
+    print(f"[INFO] Final val AUC: {final_val_auc:.4f}")
+    return final_val_auc
+
+
 def main() -> None:
     """Parse CLI args and run the requested training stage."""
     parser = argparse.ArgumentParser(description="Credit risk training loop.")
-    parser.add_argument("--stage", choices=["xgb"], required=True)
+    parser.add_argument("--stage", choices=["xgb", "lstm"], required=True)
     args = parser.parse_args()
 
     if args.stage == "xgb":
         run_xgb_stage()
+    elif args.stage == "lstm":
+        run_lstm_stage()
 
 
 if __name__ == "__main__":

@@ -89,17 +89,116 @@ def clean_tabular(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def create_synthetic_time_series(df: pd.DataFrame, window: int = 12) -> np.ndarray:
-    """Create synthetic borrower time-series windows from tabular data.
+def create_synthetic_time_series(
+    df: pd.DataFrame,
+    window: int = 12,
+    seed: int = 42,
+) -> np.ndarray:
+    """Simulate monthly payment sequences from GiveMeSomeCredit tabular features.
+
+    Each borrower gets a (window, 4) sequence of monthly observations:
+        [utilization_t, payment_ratio_t, is_late_t, balance_t]
+
+    The four tabular columns used as generative seeds:
+        - RevolvingUtilizationOfUnsecuredLines → base monthly credit utilization
+        - NumberOfTime30-59DaysPastDueNotWorse → per-month late-payment probability
+        - DebtRatio → scales the outstanding balance proxy
+        - MonthlyIncome → normalises the balance proxy (high income = lower stress)
 
     Args:
-        df: Borrower credit DataFrame.
-        window: Number of synthetic time steps to create per borrower.
+        df: Cleaned borrower DataFrame (output of clean_tabular).
+        window: Number of synthetic monthly timesteps per borrower.
+        seed: NumPy random seed for reproducibility.
 
     Returns:
-        Synthetic time-series feature array.
+        Float32 array of shape (n_borrowers, window, 4), each feature in [0, 1].
     """
-    raise NotImplementedError("Day 2 deliverable")
+    rng = np.random.default_rng(seed)
+    df = df.reset_index(drop=True)
+    n = len(df)
+
+    # --- Seed features (all already cleaned and bounded by clean_tabular) ---
+    # Fill missing seed values defensively so raw fixture data does not
+    # propagate NaNs into tensors.
+    util_seed = df["RevolvingUtilizationOfUnsecuredLines"].fillna(
+        df["RevolvingUtilizationOfUnsecuredLines"].median()
+    )
+    late_seed = df["NumberOfTime30-59DaysPastDueNotWorse"].fillna(
+        df["NumberOfTime30-59DaysPastDueNotWorse"].median()
+    )
+    debt_seed = df["DebtRatio"].fillna(df["DebtRatio"].median())
+    income_seed = df["MonthlyIncome"].fillna(df["MonthlyIncome"].median())
+
+    # RevolvingUtilization is already capped to [0, 1] — use directly as the
+    # borrower's baseline monthly credit usage level.
+    util_base = util_seed.values.astype(np.float32)
+
+    # Convert 30-59 day late count to a per-month probability.  A borrower who
+    # was late 3 times in a 12-month window has ~25% probability of being late
+    # in any given simulated month.  Cap at 0.5 so even the worst borrowers
+    # still have on-time months — preserving variation in payment_ratio_t.
+    late_prob = np.clip(
+        late_seed.values.astype(np.float32) / window,
+        0.0,
+        0.5,
+    )  # shape: (n,)
+
+    # DebtRatio and MonthlyIncome are combined into a balance-stress proxy.
+    # Normalise each to [0, 1] so neither dominates the other.
+    debt = debt_seed.values.astype(np.float32)
+    debt_norm = (debt - debt.min()) / (debt.max() - debt.min() + 1e-8)
+
+    income = income_seed.values.astype(np.float32)
+    income_norm = (income - income.min()) / (income.max() - income.min() + 1e-8)
+
+    # --- Feature 0: utilization_t ---
+    # Base utilization plus a small Gaussian random walk each month.
+    # High-utilization borrowers stay high on average; noise adds month-to-month
+    # variation without changing the underlying credit behaviour signal.
+    util_noise = rng.normal(0.0, 0.05, size=(n, window)).astype(np.float32)
+    utilization_t = np.clip(util_base[:, np.newaxis] + util_noise, 0.0, 1.0)
+
+    # --- Feature 2: is_late_t  (computed before payment_ratio to condition it) ---
+    # Bernoulli draw per borrower per month using their individual late_prob.
+    # Borrowers with more historical delinquencies have higher monthly late probability.
+    is_late_t = (
+        rng.random(size=(n, window)).astype(np.float32) < late_prob[:, np.newaxis]
+    ).astype(np.float32)  # binary {0.0, 1.0}
+
+    # --- Feature 1: payment_ratio_t ---
+    # On-time months: payment ~95% of minimum due (good payer, slight variation).
+    # Late months:    payment ~50% of minimum due (partial payment, financial stress).
+    # The 0.45 gap encodes the business intuition that late payments co-occur
+    # with lower payment amounts — they are not independent events.
+    pay_noise = rng.normal(0.0, 0.08, size=(n, window)).astype(np.float32)
+    pay_base = 0.95 - 0.45 * is_late_t  # (n, window)
+    payment_ratio_t = np.clip(pay_base + pay_noise, 0.0, 1.0)
+
+    # --- Feature 3: balance_t ---
+    # High DebtRatio and low MonthlyIncome jointly signal a borrower carrying
+    # a heavier outstanding balance relative to their means.  Multiply
+    # debt_norm by (1 - 0.5 * income_norm) so that higher income attenuates
+    # the balance stress rather than eliminating it entirely.
+    balance_base = debt_norm * (1.0 - 0.5 * income_norm)  # (n,)
+    balance_noise = rng.normal(0.0, 0.05, size=(n, window)).astype(np.float32)
+    balance_t = np.clip(balance_base[:, np.newaxis] + balance_noise, 0.0, 1.0)
+
+    # Stack to (n, window, 4) in the documented feature order.
+    sequences = np.stack(
+        [utilization_t, payment_ratio_t, is_late_t, balance_t], axis=2
+    )  # (n, window, 4)
+
+    # Final per-feature min-max normalisation across the entire dataset so the
+    # LSTM receives consistent [0, 1] inputs regardless of distributional shift
+    # between batches.  Skips features whose range is already collapsed (e.g.
+    # is_late_t is already {0, 1}).
+    for f in range(sequences.shape[2]):
+        feat = sequences[:, :, f]
+        f_min, f_max = feat.min(), feat.max()
+        if f_max > f_min:
+            sequences[:, :, f] = (feat - f_min) / (f_max - f_min)
+
+    return sequences  # (n_borrowers, window, 4), dtype float32
 
 
 def engineer_tabular_features(df: pd.DataFrame) -> pd.DataFrame:

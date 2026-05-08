@@ -6,7 +6,7 @@ xgboost
 shap
 streamlit
 pandas
-numpy
+numpy<2
 scikit-learn
 imbalanced-learn
 pyarrow
