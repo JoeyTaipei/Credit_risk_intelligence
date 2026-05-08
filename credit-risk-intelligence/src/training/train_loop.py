@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import pickle
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RAW_CREDIT_PATH = PROJECT_ROOT / "data/raw/cs-training.csv"
 PROCESSED_DIR = PROJECT_ROOT / "data/processed"
 FIGURES_DIR = PROJECT_ROOT / "docs/figures"
+SYNTHETIC_TEXT_PATH = PROJECT_ROOT / "data/synthetic/loan_descriptions.csv"
 
 
 def _metrics(y_true: Any, y_prob: np.ndarray) -> dict[str, float]:
@@ -375,10 +377,74 @@ def run_gnn_stage() -> tuple[float, dict]:
     return final_val_auc, stats
 
 
+def _encode_text_split(split_name: str, encoder: Any, text_df: pd.DataFrame) -> Any:
+    """Encode one processed split and save its text embeddings."""
+    import torch
+
+    from src.data.text_preprocessor import align_texts_with_tabular
+
+    split_path = PROCESSED_DIR / f"{split_name}.parquet"
+    if not split_path.exists():
+        raise FileNotFoundError(f"Missing processed split: {split_path}")
+
+    split_df = pd.read_parquet(split_path)
+    texts = align_texts_with_tabular(text_df, split_df)
+    embeddings = []
+
+    for start in range(0, len(texts), 64):
+        chunk = texts[start : start + 64]
+        with torch.no_grad():
+            embeddings.append(encoder.encode_texts(chunk).detach().cpu())
+
+    output = torch.cat(embeddings, dim=0)
+    output_path = PROCESSED_DIR / f"text_embeddings_{split_name}.pt"
+    torch.save(output, output_path)
+    return output, output_path
+
+
+def run_text_stage() -> dict[str, tuple[int, ...]]:
+    """Run the Day 4 frozen text embedding generation stage.
+
+    Returns:
+        Mapping of split names to embedding tensor shapes.
+    """
+    import mlflow
+
+    from src.data.text_preprocessor import load_loan_descriptions
+    from src.models.text_encoder import TextEncoder
+
+    if not SYNTHETIC_TEXT_PATH.exists():
+        raise FileNotFoundError(f"Missing synthetic text CSV: {SYNTHETIC_TEXT_PATH}")
+
+    start_time = time.perf_counter()
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    text_df = load_loan_descriptions(str(SYNTHETIC_TEXT_PATH))
+    encoder = TextEncoder(freeze=True)
+
+    with mlflow.start_run():
+        train_embeddings, train_path = _encode_text_split("train", encoder, text_df)
+        val_embeddings, val_path = _encode_text_split("val", encoder, text_df)
+        mlflow.log_artifact(str(train_path))
+        mlflow.log_artifact(str(val_path))
+
+    elapsed = time.perf_counter() - start_time
+    total = train_embeddings.shape[0] + val_embeddings.shape[0]
+    shapes = {
+        "train": tuple(train_embeddings.shape),
+        "val": tuple(val_embeddings.shape),
+    }
+    print(
+        f"[INFO] Text embeddings generated: total={total} "
+        f"train_shape={shapes['train']} val_shape={shapes['val']} "
+        f"time_taken={elapsed:.2f}s"
+    )
+    return shapes
+
+
 def main() -> None:
     """Parse CLI args and run the requested training stage."""
     parser = argparse.ArgumentParser(description="Credit risk training loop.")
-    parser.add_argument("--stage", choices=["xgb", "lstm", "gnn"], required=True)
+    parser.add_argument("--stage", choices=["xgb", "lstm", "gnn", "text"], required=True)
     args = parser.parse_args()
 
     if args.stage == "xgb":
@@ -387,6 +453,8 @@ def main() -> None:
         run_lstm_stage()
     elif args.stage == "gnn":
         run_gnn_stage()
+    elif args.stage == "text":
+        run_text_stage()
 
 
 if __name__ == "__main__":
