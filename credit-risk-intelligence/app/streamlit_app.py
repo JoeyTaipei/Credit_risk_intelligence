@@ -135,6 +135,7 @@ def _render_single_result(result: dict, borrower_data: dict, loan_description: s
         st.warning("SHAP 圖檔尚未產生")
 
     st.subheader("AI 信用分析報告")
+    st.caption("Powered by Claude Opus 4.7 — 報告內容基於 SHAP 計算結果生成，不包含模型推測。")
     prediction = {"risk_score": score, "risk_level": risk_level}
     try:
         report = generate_credit_report(borrower_data, prediction, result["top_shap_features"])

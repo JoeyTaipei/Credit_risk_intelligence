@@ -1,13 +1,13 @@
 # 信用風險智能評估系統
 
-> 一套結合結構化表格、月度時序、借款人關係圖與貸款文字描述的多模態信用風險分類系統，透過四個獨立 Encoder 的 Late Fusion 架構輸出違約機率、SHAP 可解釋性報告與 GPT-4o-mini 信貸分析，適用於金融機構的輔助信貸審核情境。
+> 一套結合結構化表格、月度時序、借款人關係圖與貸款文字描述的多模態信用風險分類系統，透過四個獨立 Encoder 的 Late Fusion 架構輸出違約機率、SHAP 可解釋性報告與 Claude Opus 4.7 信貸分析，適用於金融機構的輔助信貸審核情境。
 
 ---
 
 ## 專案亮點
 
 - **四模態 Late Fusion 架構** — XGBoost（表格）、Bi-LSTM（時序）、GraphSAGE（圖）、sentence-BERT（文字）各自學習模態專屬表示，再於決策層拼接為 128 維向量，兼顧模態獨立性與跨模態推理
-- **完整可解釋性鏈路** — XGBoost SHAP 在特徵層給出「哪個欄位推高了風險」，Fusion SHAP 在模態層給出「哪個 Encoder 貢獻最大」，GPT-4o-mini 將上述結果翻譯成信貸員可讀的中文敘事報告
+- **完整可解釋性鏈路** — XGBoost SHAP 在特徵層給出「哪個欄位推高了風險」，Fusion SHAP 在模態層給出「哪個 Encoder 貢獻最大」，Claude Opus 4.7 將上述結果翻譯成信貸員可讀的中文敘事報告
 - **模組化 Pipeline，實際資料可無縫替換** — 每個 Encoder 以固定的 (batch, 32) 向量介面對外，合成資料換成真實還款紀錄、CRM 關係圖、真實申請書時，Fusion 層完全不需修改
 
 ---
@@ -31,7 +31,7 @@ flowchart TB
   subgraph 融合與輸出
     I[Late Fusion\nMLP Classifier]
     J[SHAP 可解釋性]
-    K[GenAI 信用報告\nGPT-4o-mini]
+    K[GenAI 信用報告\nClaude Opus 4.7]
     L[Streamlit Dashboard]
   end
   A-->E
@@ -55,7 +55,7 @@ flowchart TB
 | 可解釋性 | SHAP | 特徵貢獻度分析與視覺化 |
 | 實驗追蹤 | MLflow | AUC、Loss 曲線記錄 |
 | 前端介面 | Streamlit | 互動式信貸評估 Dashboard |
-| 生成式 AI | OpenAI API (GPT-4o-mini) | SHAP 驅動的中文信貸報告生成 |
+| 生成式 AI | Anthropic Claude Opus 4.7 | SHAP 驅動的中文信貸報告生成 |
 | 資料處理 | pandas、scikit-learn | 清洗、特徵工程、評估指標 |
 
 ---
@@ -142,7 +142,7 @@ credit-risk-intelligence/
 │   │   └── fusion.py             # Late Fusion MLP + leaf embedding
 │   ├── training/                 # 各模態訓練入口
 │   ├── inference/                # 單筆推論、SHAP、報告生成
-│   └── utils/                    # SHAP 視覺化、OpenAI 封裝
+│   └── utils/                    # SHAP 視覺化、Claude Opus 封裝
 ├── tests/
 ├── pyproject.toml
 └── requirements.txt

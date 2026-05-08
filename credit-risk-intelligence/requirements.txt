@@ -11,6 +11,7 @@ scikit-learn
 imbalanced-learn
 pyarrow
 mlflow
+anthropic>=0.39.0
 openai>=1.0
 langchain
 python-dotenv
