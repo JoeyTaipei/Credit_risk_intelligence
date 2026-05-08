@@ -8,6 +8,8 @@ streamlit
 pandas
 numpy
 scikit-learn
+imbalanced-learn
+pyarrow
 mlflow
 openai>=1.0
 langchain
