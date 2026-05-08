@@ -254,16 +254,139 @@ def run_lstm_stage() -> float:
     return final_val_auc
 
 
+def run_gnn_stage() -> tuple[float, dict]:
+    """Run the Day 3 GraphSAGE encoder training stage.
+
+    Returns:
+        Final validation ROC-AUC and graph statistics.
+    """
+    import mlflow
+    import torch
+    import torch.nn as nn
+    from sklearn.metrics import roc_auc_score
+
+    from src.data.graph_builder import build_borrower_graph, get_graph_stats
+    from src.models.gnn_encoder import GraphSAGEEncoder
+
+    train_path = PROCESSED_DIR / "train.parquet"
+    if not train_path.exists():
+        raise FileNotFoundError(f"Missing processed training split: {train_path}")
+
+    torch.manual_seed(42)
+    train_df = pd.read_parquet(train_path).reset_index(drop=True)
+    edge_index, node_features = build_borrower_graph(train_df)
+    labels = torch.FloatTensor(train_df[TARGET_COL].to_numpy()).view(-1, 1)
+    stats = get_graph_stats(edge_index, n_nodes=node_features.shape[0])
+    print(f"[INFO] Graph stats: {stats}")
+
+    indices = np.arange(len(train_df))
+    train_indices, temp_indices = train_test_split(
+        indices,
+        test_size=0.30,
+        random_state=42,
+        stratify=train_df[TARGET_COL],
+    )
+    val_indices, _ = train_test_split(
+        temp_indices,
+        test_size=0.50,
+        random_state=42,
+        stratify=train_df.iloc[temp_indices][TARGET_COL],
+    )
+    train_mask = torch.zeros(len(train_df), dtype=torch.bool)
+    val_mask = torch.zeros(len(train_df), dtype=torch.bool)
+    train_mask[torch.LongTensor(train_indices)] = True
+    val_mask[torch.LongTensor(val_indices)] = True
+
+    encoder = GraphSAGEEncoder(input_dim=5, embedding_dim=32)
+    head = nn.Linear(32, 1)
+    optimizer = torch.optim.Adam(
+        list(encoder.parameters()) + list(head.parameters()),
+        lr=5e-3,
+    )
+    criterion = nn.BCEWithLogitsLoss()
+
+    best_val_loss = float("inf")
+    best_state = encoder.state_dict()
+    epochs_without_improvement = 0
+    final_val_auc = 0.0
+
+    with mlflow.start_run():
+        mlflow.log_params(
+            {
+                "stage": "gnn",
+                "epochs": 50,
+                "patience": 10,
+                "learning_rate": 5e-3,
+                "input_dim": 5,
+                "embedding_dim": 32,
+            }
+        )
+        mlflow.log_metrics(
+            {
+                "num_nodes": float(stats["num_nodes"]),
+                "num_edges": float(stats["num_edges"]),
+                "avg_degree": float(stats["avg_degree"]),
+            }
+        )
+
+        for epoch in range(1, 51):
+            encoder.train()
+            head.train()
+            optimizer.zero_grad()
+            logits = head(encoder(node_features, edge_index))
+            train_loss = criterion(logits[train_mask], labels[train_mask])
+            train_loss.backward()
+            optimizer.step()
+
+            encoder.eval()
+            head.eval()
+            with torch.no_grad():
+                val_logits = head(encoder(node_features, edge_index))
+                val_loss = criterion(val_logits[val_mask], labels[val_mask])
+                val_prob = torch.sigmoid(val_logits[val_mask]).cpu().numpy().ravel()
+                final_val_auc = float(roc_auc_score(labels[val_mask].numpy().ravel(), val_prob))
+
+            mlflow.log_metric("train_loss", float(train_loss.item()), step=epoch)
+            mlflow.log_metric("val_loss", float(val_loss.item()), step=epoch)
+            mlflow.log_metric("val_auc", final_val_auc, step=epoch)
+            print(
+                f"[INFO] epoch={epoch} train_loss={train_loss.item():.4f} "
+                f"val_loss={val_loss.item():.4f} val_auc={final_val_auc:.4f}"
+            )
+
+            if val_loss.item() < best_val_loss:
+                best_val_loss = val_loss.item()
+                best_state = {
+                    name: value.detach().cpu().clone()
+                    for name, value in encoder.state_dict().items()
+                }
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= 10:
+                    print(f"[INFO] Early stopping at epoch {epoch}.")
+                    break
+
+    encoder.load_state_dict(best_state)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    torch.save(encoder.state_dict(), PROCESSED_DIR / "gnn_encoder.pt")
+    print(f"[INFO] Final val AUC: {final_val_auc:.4f}")
+    print(f"[INFO] Final graph stats: {stats}")
+    return final_val_auc, stats
+
+
 def main() -> None:
     """Parse CLI args and run the requested training stage."""
     parser = argparse.ArgumentParser(description="Credit risk training loop.")
-    parser.add_argument("--stage", choices=["xgb", "lstm"], required=True)
+    parser.add_argument("--stage", choices=["xgb", "lstm", "gnn"], required=True)
     args = parser.parse_args()
 
     if args.stage == "xgb":
         run_xgb_stage()
     elif args.stage == "lstm":
         run_lstm_stage()
+    elif args.stage == "gnn":
+        run_gnn_stage()
 
 
 if __name__ == "__main__":
