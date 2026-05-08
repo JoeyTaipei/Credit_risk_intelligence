@@ -441,10 +441,194 @@ def run_text_stage() -> dict[str, tuple[int, ...]]:
     return shapes
 
 
+def _load_pickle(path: Path) -> Any:
+    """Load a pickle artifact from disk."""
+    with path.open("rb") as file:
+        return pickle.load(file)
+
+
+def _make_lstm_embeddings(df: pd.DataFrame, state_path: Path) -> Any:
+    """Create LSTM embeddings for one split using a saved encoder state."""
+    import torch
+
+    from src.models.lstm_encoder import LSTMEncoder
+
+    encoder = LSTMEncoder(input_size=4, embedding_dim=32)
+    encoder.load_state_dict(torch.load(state_path, map_location="cpu"))
+    encoder.eval()
+    with torch.no_grad():
+        sequences = torch.FloatTensor(create_synthetic_time_series(df))
+        return encoder(sequences).detach().cpu()
+
+
+def _make_gnn_embeddings(df: pd.DataFrame, state_path: Path) -> Any:
+    """Create GraphSAGE embeddings for one split using a saved encoder state."""
+    import torch
+
+    from src.data.graph_builder import build_borrower_graph
+    from src.models.gnn_encoder import GraphSAGEEncoder
+
+    edge_index, node_features = build_borrower_graph(df)
+    encoder = GraphSAGEEncoder(input_dim=5, embedding_dim=32)
+    encoder.load_state_dict(torch.load(state_path, map_location="cpu"))
+    encoder.eval()
+    with torch.no_grad():
+        return encoder(node_features, edge_index).detach().cpu()
+
+
+def _fusion_metrics(labels: Any, probabilities: Any) -> dict[str, float]:
+    """Compute fusion validation metrics."""
+    y_true = labels.detach().cpu().numpy().ravel()
+    y_prob = probabilities.detach().cpu().numpy().ravel()
+    y_pred = (y_prob >= 0.5).astype(int)
+    return {
+        "roc_auc": float(roc_auc_score(y_true, y_prob)),
+        "pr_auc": float(average_precision_score(y_true, y_prob)),
+        "f1@0.5": float(f1_score(y_true, y_pred, zero_division=0)),
+    }
+
+
+def run_fusion_stage() -> dict[str, float]:
+    """Run the Day 5 late-fusion classifier training stage.
+
+    Returns:
+        Validation metrics dictionary.
+    """
+    import mlflow
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from src.models.fusion import LateFusionClassifier, get_xgb_leaf_embeddings
+
+    required_paths = {
+        "train": PROCESSED_DIR / "train.parquet",
+        "val": PROCESSED_DIR / "val.parquet",
+        "xgb": PROCESSED_DIR / "xgb_baseline.pkl",
+        "lstm": PROCESSED_DIR / "lstm_encoder.pt",
+        "gnn": PROCESSED_DIR / "gnn_encoder.pt",
+        "text_train": PROCESSED_DIR / "text_embeddings_train.pt",
+        "text_val": PROCESSED_DIR / "text_embeddings_val.pt",
+    }
+    missing = [str(path) for path in required_paths.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing fusion artifacts: {missing}")
+
+    torch.manual_seed(42)
+    train_df = pd.read_parquet(required_paths["train"])
+    val_df = pd.read_parquet(required_paths["val"])
+    xgb_model = _load_pickle(required_paths["xgb"])
+
+    X_train, y_train_series = _feature_target(train_df)
+    X_val, y_val_series = _feature_target(val_df)
+    train_labels = torch.FloatTensor(y_train_series.to_numpy()).view(-1, 1)
+    val_labels = torch.FloatTensor(y_val_series.to_numpy()).view(-1, 1)
+
+    train_tabular = get_xgb_leaf_embeddings(xgb_model, X_train)
+    val_tabular = get_xgb_leaf_embeddings(xgb_model, X_val)
+    train_lstm = _make_lstm_embeddings(train_df, required_paths["lstm"])
+    val_lstm = _make_lstm_embeddings(val_df, required_paths["lstm"])
+    train_gnn = _make_gnn_embeddings(train_df, required_paths["gnn"])
+    val_gnn = _make_gnn_embeddings(val_df, required_paths["gnn"])
+    train_text = torch.load(required_paths["text_train"], map_location="cpu").float()
+    val_text = torch.load(required_paths["text_val"], map_location="cpu").float()
+
+    train_dataset = TensorDataset(
+        train_tabular,
+        train_lstm,
+        train_gnn,
+        train_text,
+        train_labels,
+    )
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+
+    model = LateFusionClassifier()
+    pos_count = train_labels.sum()
+    neg_count = train_labels.numel() - pos_count
+    pos_weight = neg_count / pos_count.clamp(min=1.0)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+
+    best_val_loss = float("inf")
+    best_state = model.state_dict()
+    epochs_without_improvement = 0
+    final_metrics: dict[str, float] = {}
+
+    with mlflow.start_run():
+        mlflow.log_params(
+            {
+                "stage": "fusion",
+                "batch_size": 256,
+                "epochs": 30,
+                "patience": 7,
+                "learning_rate": 1e-3,
+                "weight_decay": 1e-4,
+                "pos_weight": float(pos_weight.item()),
+            }
+        )
+
+        for epoch in range(1, 31):
+            model.train()
+            train_loss_total = 0.0
+            train_examples = 0
+            for tabular, lstm, gnn, text, labels in train_loader:
+                optimizer.zero_grad()
+                logits = model(tabular, lstm, gnn, text)
+                loss = criterion(logits, labels)
+                loss.backward()
+                optimizer.step()
+
+                batch_size = labels.size(0)
+                train_loss_total += loss.item() * batch_size
+                train_examples += batch_size
+
+            train_loss = train_loss_total / train_examples
+
+            model.eval()
+            with torch.no_grad():
+                val_logits = model(val_tabular, val_lstm, val_gnn, val_text)
+                val_loss = criterion(val_logits, val_labels)
+                val_prob = torch.sigmoid(val_logits)
+                final_metrics = _fusion_metrics(val_labels, val_prob)
+
+            mlflow.log_metric("train_loss", train_loss, step=epoch)
+            mlflow.log_metric("val_loss", float(val_loss.item()), step=epoch)
+            mlflow.log_metric("val_auc", final_metrics["roc_auc"], step=epoch)
+            mlflow.log_metric("val_pr_auc", final_metrics["pr_auc"], step=epoch)
+            print(
+                f"[INFO] epoch={epoch} train_loss={train_loss:.4f} "
+                f"val_loss={val_loss.item():.4f} val_auc={final_metrics['roc_auc']:.4f} "
+                f"val_pr_auc={final_metrics['pr_auc']:.4f}"
+            )
+
+            if val_loss.item() < best_val_loss:
+                best_val_loss = val_loss.item()
+                best_state = {
+                    name: value.detach().cpu().clone()
+                    for name, value in model.state_dict().items()
+                }
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= 7:
+                    print(f"[INFO] Early stopping at epoch {epoch}.")
+                    break
+
+    model.load_state_dict(best_state)
+    output_path = PROCESSED_DIR / "fusion_model.pt"
+    torch.save(model.state_dict(), output_path)
+    print(
+        f"[INFO] Fusion val AUC: {final_metrics['roc_auc']:.4f} "
+        f"PR-AUC: {final_metrics['pr_auc']:.4f} "
+        f"F1@0.5: {final_metrics['f1@0.5']:.4f}"
+    )
+    return final_metrics
+
+
 def main() -> None:
     """Parse CLI args and run the requested training stage."""
     parser = argparse.ArgumentParser(description="Credit risk training loop.")
-    parser.add_argument("--stage", choices=["xgb", "lstm", "gnn", "text"], required=True)
+    parser.add_argument("--stage", choices=["xgb", "lstm", "gnn", "text", "fusion"], required=True)
     args = parser.parse_args()
 
     if args.stage == "xgb":
@@ -455,6 +639,8 @@ def main() -> None:
         run_gnn_stage()
     elif args.stage == "text":
         run_text_stage()
+    elif args.stage == "fusion":
+        run_fusion_stage()
 
 
 if __name__ == "__main__":
