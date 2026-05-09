@@ -9,7 +9,7 @@ description = "Multi-Modal Credit Risk Intelligence"
 requires-python = ">=3.11"
 
 [tool.setuptools.packages.find]
-where = ["credit-risk-intelligence"]
+where = ["."]
 include = ["src*"]
 
 [tool.ruff]

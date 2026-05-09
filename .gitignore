@@ -6,3 +6,58 @@ mlflow.db
 
 __pycache__/
 *.py[cod]
+*.pyc
+*$py.class
+
+# Build and packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Test and coverage output
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+cover/
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDEs and notebooks
+.idea/
+.vscode/
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+
+# Project data and artifacts
+outputs/
+data/raw/
+data/processed/
+data/synthetic/
+*.pkl
+*.pt
+.streamlit/secrets.toml

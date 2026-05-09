@@ -32,12 +32,12 @@ def generate_credit_report(
     """Generate a Traditional Chinese credit assessment report via Claude Opus 4.7.
 
     Args:
-        borrower_data:     Borrower feature values used for credit risk evaluation.
-        prediction:        Prediction output containing risk_score and risk_level.
+        borrower_data: Borrower feature values used for credit risk evaluation.
+        prediction: Prediction output containing risk_score and risk_level.
         shap_top_features: Top SHAP feature tuples as (feature_name, shap_value, raw_value).
 
     Returns:
-        Markdown credit assessment report, or a fallback failure message.
+        Markdown credit assessment report, or a recognizable fallback failure message.
     """
     from anthropic import Anthropic
     from dotenv import load_dotenv
@@ -53,10 +53,6 @@ def generate_credit_report(
         return fallback
 
     client = Anthropic(api_key=api_key)
-
-    # Build a structured user prompt grounding Claude in the computed evidence.
-    # All SHAP values and raw feature values are injected here so the model
-    # cannot introduce claims that are not backed by the pipeline's output.
     shap_payload = [
         {"feature_name": name, "shap_value": round(float(value), 4), "raw_value": raw_value}
         for name, value, raw_value in shap_top_features
@@ -81,11 +77,9 @@ def generate_credit_report(
             return report_text.strip() if report_text else fallback
         except Exception as exc:
             print(f"[ERROR] Claude report generation failed on attempt {attempt + 1}: {exc}")
-            # Exponential backoff: 1 s, 2 s, 4 s before returning the fallback.
             time.sleep(2**attempt)
 
     return fallback
 
 
-# Alias for clarity in import statements that reference the model by name.
 generate_credit_report_opus = generate_credit_report
