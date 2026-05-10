@@ -47,7 +47,8 @@ env/
 
 # IDEs and notebooks
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 .ipynb_checkpoints/
 
 # Environment variables
@@ -59,5 +60,8 @@ data/raw/
 data/processed/
 data/synthetic/
 *.pkl
+*.joblib
 *.pt
+*.pth
+*.log
 .streamlit/secrets.toml
