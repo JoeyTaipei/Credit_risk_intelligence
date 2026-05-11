@@ -1,6 +1,8 @@
 streamlit
 pandas
 numpy<2
+scipy
+scikit-learn
 matplotlib
 shap
 openai>=1.0

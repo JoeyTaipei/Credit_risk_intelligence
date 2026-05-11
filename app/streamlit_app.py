@@ -8,9 +8,15 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
-matplotlib.rcParams["font.family"] = "Noto Sans TC"
 matplotlib.rcParams["axes.unicode_minus"] = False
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as _fm
+_CJK_CANDIDATES = ["Noto Sans TC", "Noto Sans CJK TC", "Noto Sans HK",
+                   "Microsoft YaHei", "SimHei", "Arial Unicode MS"]
+for _f in _CJK_CANDIDATES:
+    if any(_f.lower() in _font.name.lower() for _font in _fm.fontManager.ttflist):
+        matplotlib.rcParams["font.family"] = _f
+        break
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -98,11 +104,14 @@ def load_predictions() -> tuple[pd.DataFrame, bool]:
 
 @st.cache_data
 def load_shap_data():
-    """Returns a shap.Explanation (or raw array), or None if file missing."""
+    """Returns a shap.Explanation (or raw array), or None if file missing or incompatible."""
     if not SHAP_PATH.exists():
         return None
-    with SHAP_PATH.open("rb") as fh:
-        return pickle.load(fh)
+    try:
+        with SHAP_PATH.open("rb") as fh:
+            return pickle.load(fh)
+    except Exception:
+        return None
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
