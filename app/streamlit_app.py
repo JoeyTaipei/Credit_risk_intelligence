@@ -143,9 +143,9 @@ def _apply_dark_theme(fig) -> None:
 def _show_plot_image(fig, caption: str | None = None) -> None:
     """Render matplotlib output as a PNG image so Streamlit always receives an image."""
     buffer = BytesIO()
-    fig.savefig(buffer, format="png", dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
+    fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
     buffer.seek(0)
-    st.image(buffer, caption=caption, width=680)
+    st.image(buffer, caption=caption, use_container_width=True)
     plt.close(fig)
 
 
@@ -228,79 +228,71 @@ st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 st.progress(risk_score)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Section 2 — SHAP Explanation
+# Sections 2 + 3 — side-by-side: AI report (left) | SHAP chart (right)
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.markdown("## SHAP 特徵解釋")
+col_report, col_shap = st.columns([1, 1], gap="large")
 
-_shap_rendered = False
+# ── right: SHAP ───────────────────────────────────────────────────────────────
+with col_shap:
+    st.markdown("## SHAP 特徵解釋")
 
-if shap_obj is not None:
-    try:
-        import shap
+    _shap_rendered = False
 
-        # pkl may be a bare Explanation or wrapped in a tuple
-        explanation = shap_obj[0] if isinstance(shap_obj, tuple) else shap_obj
-
-        # map selected borrower to its position in the shap array
+    if shap_obj is not None:
         try:
-            borrower_idx = borrower_ids.index(selected_id)
-        except ValueError:
-            borrower_idx = 0
-        borrower_idx = min(borrower_idx, len(explanation) - 1)
+            import shap
 
-        shap.plots.waterfall(explanation[borrower_idx], max_display=10, show=False)
-        fig = plt.gcf()
-        fig.patch.set_facecolor("#0D1117")
-        _apply_dark_theme(fig)
-        _show_plot_image(fig, caption=f"借款人 #{selected_id} SHAP waterfall")
-        _shap_rendered = True
-    except Exception as exc:
-        st.warning(f"SHAP waterfall 繪圖失敗：{exc}，顯示示範條形圖。")
+            explanation = shap_obj[0] if isinstance(shap_obj, tuple) else shap_obj
+            try:
+                borrower_idx = borrower_ids.index(selected_id)
+            except ValueError:
+                borrower_idx = 0
+            borrower_idx = min(borrower_idx, len(explanation) - 1)
 
-if not _shap_rendered:
-    if shap_obj is None:
-        st.warning("shap_values.pkl 未找到，顯示示範特徵貢獻圖。")
+            shap.plots.waterfall(explanation[borrower_idx], max_display=10, show=False)
+            fig = plt.gcf()
+            fig.patch.set_facecolor("#0D1117")
+            _apply_dark_theme(fig)
+            _show_plot_image(fig)
+            _shap_rendered = True
+        except Exception as exc:
+            st.warning(f"SHAP waterfall 繪圖失敗：{exc}，顯示示範條形圖。")
 
-    # seed on borrower so each selection looks distinct
-    seed = abs(hash(str(selected_id))) % (2 ** 32)
-    rng = np.random.default_rng(seed)
-    feats = [
-        "RevolvingUtilizationOfUnsecuredLines",
-        "NumberOfTimes90DaysLate",
-        "DebtRatio",
-        "MonthlyIncome",
-        "NumberOfTime30-59DaysPastDueNotWorse",
-    ]
-    vals = rng.uniform(-0.3, 0.4, 5)
+    if not _shap_rendered:
+        seed = abs(hash(str(selected_id))) % (2 ** 32)
+        rng = np.random.default_rng(seed)
+        feats = [
+            "RevolvingUtilizationOfUnsecuredLines",
+            "NumberOfTimes90DaysLate",
+            "DebtRatio",
+            "MonthlyIncome",
+            "NumberOfTime30-59DaysPastDueNotWorse",
+        ]
+        vals = rng.uniform(-0.3, 0.4, 5)
+        fig, ax = plt.subplots(figsize=(8, 5))
+        fig.patch.set_facecolor("#161B22")
+        ax.set_facecolor("#161B22")
+        bar_colors = ["#F85149" if v > 0 else "#3FB950" for v in vals]
+        ax.barh(feats, vals, color=bar_colors, height=0.5)
+        ax.axvline(0, color="#8B949E", linewidth=0.8, linestyle="--")
+        ax.set_xlabel("SHAP 貢獻值", color="#8B949E", fontsize=12)
+        ax.tick_params(colors="#E6EDF3", labelsize=11)
+        for spine in ax.spines.values():
+            spine.set_color("#30363D")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.set_title(
+            f"借款人 #{selected_id} — 前 5 特徵貢獻",
+            color="#E6EDF3", pad=12, fontsize=14,
+        )
+        plt.tight_layout()
+        _show_plot_image(fig)
 
-    fig, ax = plt.subplots(figsize=(9, 4))
-    fig.patch.set_facecolor("#161B22")
-    ax.set_facecolor("#161B22")
-    bar_colors = ["#F85149" if v > 0 else "#3FB950" for v in vals]
-    ax.barh(feats, vals, color=bar_colors, height=0.5)
-    ax.axvline(0, color="#8B949E", linewidth=0.8, linestyle="--")
-    ax.set_xlabel("SHAP 貢獻值", color="#8B949E", fontsize=11)
-    ax.tick_params(colors="#E6EDF3", labelsize=10)
-    for spine in ax.spines.values():
-        spine.set_color("#30363D")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.set_title(
-        f"借款人 #{selected_id} — 前 5 特徵貢獻（示範）",
-        color="#E6EDF3",
-        pad=12,
-        fontsize=13,
-    )
-    plt.tight_layout()
-    _show_plot_image(fig, caption=f"借款人 #{selected_id} 示範 SHAP 特徵貢獻")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 3 — AI Credit Report
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown("## AI 授信摘要報告")
-st.caption(f"Powered by OpenAI ({OPENAI_MODEL}) — 報告基於 SHAP 數據生成，不含推測")
+# ── left: AI report ───────────────────────────────────────────────────────────
+with col_report:
+    st.markdown("## AI 授信摘要報告")
+    st.caption(f"Powered by OpenAI ({OPENAI_MODEL}) — 報告基於 SHAP 數據生成，不含推測")
 
 _SYSTEM_PROMPT = (
     "你是一位專業信貸分析師。根據提供的 SHAP 特徵貢獻數據，"
@@ -390,7 +382,7 @@ def _stream_report(user_msg: str, r: pd.Series):
 
 
 _REPORT_STYLE = (
-    'font-size:1.15rem;line-height:1.85;padding:20px 24px;'
+    'font-size:1.25rem;line-height:1.9;padding:22px 26px;'
     'background:#161B22;border-radius:10px;border:1px solid #30363D;'
 )
 
