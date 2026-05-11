@@ -65,3 +65,7 @@ data/synthetic/
 *.pth
 *.log
 .streamlit/secrets.toml
+
+# Allow pre-generated demo outputs for Streamlit Cloud
+!data/processed/predictions.csv
+!data/processed/shap_values.pkl

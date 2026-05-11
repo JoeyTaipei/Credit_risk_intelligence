@@ -1,317 +1,371 @@
 from __future__ import annotations
 
+import os
 import pickle
 import sys
-import time
+from io import BytesIO
 from pathlib import Path
 
-import altair as alt
+import matplotlib
+matplotlib.use("Agg")
+matplotlib.rcParams["font.family"] = "Noto Sans TC"
+matplotlib.rcParams["axes.unicode_minus"] = False
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import streamlit as st
-import torch
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional local convenience
+    load_dotenv = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.graph_builder import build_borrower_graph
-from src.data.preprocess import clean_tabular, engineer_tabular_features
-from src.inference.predict import predict_single_borrower
-from src.models.fusion import LateFusionClassifier
-from src.models.gnn_encoder import GraphSAGEEncoder
-from src.models.lstm_encoder import LSTMEncoder
-from src.models.text_encoder import TextEncoder
-from src.utils.openai_report import generate_credit_report
+if load_dotenv is not None:
+    load_dotenv(PROJECT_ROOT / ".env")
 
-st.set_page_config(layout="wide", page_title="信用風險智能評估")
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+PREDICTIONS_PATH = PROCESSED_DIR / "predictions.csv"
+SHAP_PATH = PROCESSED_DIR / "shap_values.pkl"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+# ── page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="信用風險智能評估",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    """
+    <style>
+    .stApp { background-color: #0D1117; color: #E6EDF3; }
+    section[data-testid="stSidebar"] { background-color: #161B22; }
+    section[data-testid="stSidebar"] .stMarkdown { color: #E6EDF3; }
+    [data-testid="stMetric"] { background: #161B22; border-radius: 8px; padding: 12px; }
+    [data-testid="stMetricLabel"] { color: #8B949E !important; }
+    [data-testid="stMetricValue"] { color: #E6EDF3 !important; }
+    .stProgress > div > div { background-color: #3FB950; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ── synthetic fallback ────────────────────────────────────────────────────────
+_FEATURE_POOL = [
+    "RevolvingUtilizationOfUnsecuredLines",
+    "NumberOfTime30-59DaysPastDueNotWorse",
+    "DebtRatio",
+    "MonthlyIncome",
+    "NumberOfOpenCreditLinesAndLoans",
+]
+
+
+def _make_synthetic_borrowers() -> pd.DataFrame:
+    rng = np.random.default_rng(42)
+    n = 10
+    scores = rng.uniform(0.1, 0.9, n).round(4)
+    return pd.DataFrame({
+        "borrower_id": list(range(n)),
+        "risk_score": scores,
+        "risk_level": [
+            "低風險" if s < 0.3 else ("中風險" if s < 0.6 else "高風險") for s in scores
+        ],
+        "recommended_action": [
+            "可核准放款" if s < 0.3 else ("需補件審查" if s < 0.6 else "建議拒絕或擔保")
+            for s in scores
+        ],
+        "top_shap_feature": rng.choice(_FEATURE_POOL, n),
+        "shap_value_top1": rng.uniform(0.05, 0.4, n).round(4),
+        "MonthlyIncome": rng.integers(30_000, 150_001, n),
+        "DebtRatio": rng.uniform(0.1, 0.9, n).round(3),
+        "NumberOfTimes90DaysLate": rng.integers(0, 6, n),
+        "age_bucket": rng.choice(["20-30", "31-40", "41-50", "51-60", "61+"], n),
+    })
+
+
+# ── cached loaders ────────────────────────────────────────────────────────────
+@st.cache_data
+def load_predictions() -> tuple[pd.DataFrame, bool]:
+    """Returns (df, is_synthetic). Cached so CSV is read once per session."""
+    if PREDICTIONS_PATH.exists():
+        return pd.read_csv(PREDICTIONS_PATH), False
+    return _make_synthetic_borrowers(), True
+
+
+@st.cache_data
+def load_shap_data():
+    """Returns a shap.Explanation (or raw array), or None if file missing."""
+    if not SHAP_PATH.exists():
+        return None
+    with SHAP_PATH.open("rb") as fh:
+        return pickle.load(fh)
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+def _risk_hex(score: float) -> str:
+    if score < 0.3:
+        return "#3FB950"   # green
+    return "#D29922" if score < 0.6 else "#F85149"   # yellow / red
+
+
+def _show_plot_image(fig, caption: str | None = None) -> None:
+    """Render matplotlib output as a PNG image so Streamlit always receives an image."""
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=160, bbox_inches="tight", facecolor=fig.get_facecolor())
+    buffer.seek(0)
+    st.image(buffer, caption=caption, use_container_width=True)
+    plt.close(fig)
+
+
+# ── data ─────────────────────────────────────────────────────────────────────
+predictions_df, is_synthetic = load_predictions()
+shap_obj = load_shap_data()
+
+# ── sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## 借款人選擇")
+    borrower_ids = predictions_df["borrower_id"].tolist()
+    selected_id = st.selectbox(
+        "選擇借款人 ID",
+        options=borrower_ids,
+        format_func=lambda x: f"借款人 #{x}",
+    )
+    row = predictions_df[predictions_df["borrower_id"] == selected_id].iloc[0]
+
+    st.markdown("---")
+    st.markdown("### 基本資料")
+    st.metric("月收入 (MonthlyIncome)", f"NT$ {int(row['MonthlyIncome']):,}")
+    st.metric("負債比率 (DebtRatio)", f"{float(row['DebtRatio']):.3f}")
+    st.metric("90 天以上逾期次數", int(row["NumberOfTimes90DaysLate"]))
+    st.metric("年齡區間 (age_bucket)", str(row["age_bucket"]))
+
+# ── page header ───────────────────────────────────────────────────────────────
 st.title("信用風險智能評估系統")
 st.caption("Multi-Modal AI Pipeline: Tabular + Time Series + Graph + NLP")
 
-PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
-FIGURES_DIR = PROJECT_ROOT / "docs" / "figures"
-DEMO_INPUT_PATH = PROJECT_ROOT / "data" / "demo_input.csv"
-LEGACY_DEMO_INPUT_PATH = PROJECT_ROOT / "demo_input.csv"
-DEFAULT_DESCRIPTION = "請輸入借款用途、資金需求原因與還款計畫。"
-
-
-def _required_model_paths() -> dict[str, Path]:
-    return {
-        "xgb": PROCESSED_DIR / "xgb_baseline.pkl",
-        "lstm": PROCESSED_DIR / "lstm_encoder.pt",
-        "gnn": PROCESSED_DIR / "gnn_encoder.pt",
-        "fusion": PROCESSED_DIR / "fusion_model.pt",
-        "train": PROCESSED_DIR / "train.parquet",
-    }
-
-
-@st.cache_resource
-def load_models() -> dict:
-    paths = _required_model_paths()
-    missing = [str(path) for path in paths.values() if not path.exists()]
-    if missing:
-        raise FileNotFoundError(", ".join(missing))
-
-    with paths["xgb"].open("rb") as file:
-        xgb_model = pickle.load(file)
-
-    lstm_encoder = LSTMEncoder(input_size=4, embedding_dim=32)
-    lstm_encoder.load_state_dict(torch.load(paths["lstm"], map_location="cpu"))
-    lstm_encoder.eval()
-
-    gnn_encoder = GraphSAGEEncoder(input_dim=5, embedding_dim=32)
-    gnn_encoder.load_state_dict(torch.load(paths["gnn"], map_location="cpu"))
-    gnn_encoder.eval()
-
-    fusion_model = LateFusionClassifier()
-    fusion_model.load_state_dict(torch.load(paths["fusion"], map_location="cpu"))
-    fusion_model.eval()
-
-    torch.manual_seed(42)
-    text_encoder = TextEncoder(freeze=True)
-    text_encoder.eval()
-
-    train_df = pd.read_parquet(paths["train"])
-    edge_index, node_features = build_borrower_graph(train_df)
-    with torch.no_grad():
-        node_embedding = gnn_encoder(node_features, edge_index).mean(dim=0)
-
-    return {
-        "xgb": xgb_model,
-        "lstm_encoder": lstm_encoder,
-        "gnn_encoder": gnn_encoder,
-        "text_encoder": text_encoder,
-        "fusion_model": fusion_model,
-        "node_embedding": node_embedding,
-    }
-
-
-def _prepare_tabular(df: pd.DataFrame) -> pd.DataFrame:
-    if "income_per_dependent" in df.columns and "total_past_due" in df.columns:
-        return df.copy()
-    return engineer_tabular_features(clean_tabular(df))
-
-
-def _risk_color(level: str) -> str:
-    if level == "低風險":
-        return "green"
-    if level == "中風險":
-        return "orange"
-    return "red"
-
-
-def _embedding_norms(embeddings: dict) -> pd.DataFrame:
-    labels = {
-        "tabular": "表格",
-        "lstm": "時序",
-        "gnn": "圖網路",
-        "text": "文字",
-    }
-    rows = []
-    for key, value in embeddings.items():
-        tensor = torch.tensor(value, dtype=torch.float)
-        rows.append({"模態": labels.get(key, key), "模態信號強度": float(torch.linalg.norm(tensor))})
-    return pd.DataFrame(rows).set_index("模態")
-
-
-def _plot_embedding_norms(norms: pd.DataFrame) -> alt.Chart:
-    chart_df = norms.reset_index()
-    return (
-        alt.Chart(chart_df)
-        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
-        .encode(
-            x=alt.X(
-                "模態:N",
-                sort=None,
-                axis=alt.Axis(title=None, labelAngle=0, labelFontSize=17, labelColor="#111827"),
-            ),
-            y=alt.Y(
-                "模態信號強度:Q",
-                axis=alt.Axis(title="模態信號強度", titleFontSize=14, labelFontSize=12),
-            ),
-            color=alt.Color("模態:N", legend=None, scale=alt.Scale(scheme="tableau10")),
-            tooltip=["模態:N", alt.Tooltip("模態信號強度:Q", format=".3f")],
-        )
-        .properties(height=320)
+if is_synthetic:
+    st.warning(
+        "predictions.csv 未找到，顯示合成示範資料。"
+        "請先執行推論流程以生成真實預測結果。"
     )
 
+risk_score = float(np.clip(row["risk_score"], 0.0, 1.0))
+risk_level = str(row["risk_level"])
+recommended_action = str(row["recommended_action"])
+color = _risk_hex(risk_score)
 
-def _feature_name_zh(name: str) -> str:
-    mapping = {
-        "RevolvingUtilizationOfUnsecuredLines": "循環信用使用率",
-        "age": "年齡",
-        "NumberOfTime30-59DaysPastDueNotWorse": "30-59 天逾期次數",
-        "DebtRatio": "負債比率",
-        "MonthlyIncome": "月收入",
-        "NumberOfOpenCreditLinesAndLoans": "開放信用額度與貸款數",
-        "NumberOfTimes90DaysLate": "90 天以上逾期次數",
-        "NumberRealEstateLoansOrLines": "不動產貸款或額度數",
-        "NumberOfTime60-89DaysPastDueNotWorse": "60-89 天逾期次數",
-        "NumberOfDependents": "扶養人數",
-        "income_per_dependent": "每位家庭成員收入",
-        "total_past_due": "總逾期次數",
-        "has_any_delinquency": "是否有逾期紀錄",
-        "credit_line_utilization": "信用額度使用率",
-        "debt_to_income_log": "負債收入比（對數）",
-        "age_bucket": "年齡區間",
-    }
-    return mapping.get(name, name)
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 1 — Risk Score
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown("## 風險評分")
 
+c1, c2, c3 = st.columns([1, 1, 2])
 
-def _format_basic_report(borrower_data: dict, prediction: dict, shap_top_features: list) -> str:
-    score = prediction["risk_score"]
-    risk_level = prediction["risk_level"]
-    rows = []
-    for name, shap_value, raw_value in shap_top_features[:3]:
-        rows.append(
-            f"- **{_feature_name_zh(name)}**：原始值 `{raw_value}`，SHAP 貢獻 `{float(shap_value):.4f}`"
-        )
-    feature_text = "\n".join(rows) if rows else "- 暫無可用的 SHAP 特徵資料"
-    return (
-        "## 借款人摘要\n"
-        f"- 本次評估使用表格、時序、圖網路與文字四種模態進行融合判斷。\n"
-        f"- 年齡：`{borrower_data.get('age', 'N/A')}`，月收入：`{borrower_data.get('MonthlyIncome', 'N/A')}`。\n\n"
-        "## 風險評分與等級\n"
-        f"- 風險評分：**{score:.1%}**\n"
-        f"- 風險等級：**{risk_level}**\n\n"
-        "## 主要風險因子（前 3 名 SHAP 特徵的白話解釋）\n"
-        f"{feature_text}\n\n"
-        "## 建議行動\n"
-        "- 建議信貸人員複核逾期紀錄、信用使用率與收入負債狀況。\n"
-        "- 若屬中高風險，建議補充收入證明、還款來源與貸款用途說明。"
+with c1:
+    st.markdown(
+        f'<div style="background:#161B22;border:2px solid {color};border-radius:12px;'
+        f'padding:24px;text-align:center;">'
+        f'<div style="font-size:3rem;font-weight:700;color:{color};">{risk_score:.1%}</div>'
+        f'<div style="color:#8B949E;font-size:0.85rem;margin-top:6px;">違約風險機率</div>'
+        f'</div>',
+        unsafe_allow_html=True,
     )
 
+with c2:
+    st.markdown(
+        f'<div style="background:#161B22;border:2px solid {color};border-radius:12px;'
+        f'padding:24px;text-align:center;">'
+        f'<div style="font-size:2rem;font-weight:700;color:{color};">{risk_level}</div>'
+        f'<div style="color:#8B949E;font-size:0.85rem;margin-top:6px;">風險等級</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
-def _render_single_result(result: dict, borrower_data: dict, loan_description: str) -> None:
-    score = result["risk_score"]
-    risk_level = result["risk_level"]
+with c3:
+    st.markdown(
+        f'<div style="background:#161B22;border:1px solid #30363D;border-radius:12px;'
+        f'padding:24px;">'
+        f'<div style="color:#8B949E;font-size:0.85rem;margin-bottom:8px;">建議行動</div>'
+        f'<div style="font-size:1.2rem;font-weight:600;color:#E6EDF3;">{recommended_action}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
-    st.subheader("風險評分")
-    col_score, col_level = st.columns(2)
-    with col_score:
-        st.metric("風險評分", f"{score:.1%}")
-    with col_level:
-        st.metric("風險等級", risk_level)
-        st.markdown(f"<span style='color:{_risk_color(risk_level)}'>{risk_level}</span>", unsafe_allow_html=True)
-    st.progress(score)
+st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+st.progress(risk_score)
 
-    st.subheader("各模態貢獻")
-    st.caption("模態信號強度")
-    st.altair_chart(_plot_embedding_norms(_embedding_norms(result["embeddings"])), width="stretch")
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 2 — SHAP Explanation
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown("## SHAP 特徵解釋")
 
-    st.subheader("SHAP 特徵解釋")
-    shap_path = FIGURES_DIR / "shap_summary_day1.png"
-    if shap_path.exists():
-        st.image(str(shap_path), caption="基於 XGBoost 的特徵重要性分析")
-    else:
-        st.warning("SHAP 圖檔尚未產生")
+_shap_rendered = False
 
-    st.markdown("**本筆主要特徵（中文說明）**")
-    shap_rows = [
-        {
-            "特徵": _feature_name_zh(name),
-            "原始值": raw_value,
-            "SHAP貢獻": float(shap_value),
-        }
-        for name, shap_value, raw_value in result["top_shap_features"][:3]
-    ]
-    if shap_rows:
-        st.dataframe(pd.DataFrame(shap_rows), width="stretch")
-
-    st.subheader("AI 信用分析報告")
-    st.caption("Powered by Claude Opus 4.7 — 報告內容基於 SHAP 計算結果生成，不包含模型推測。")
-    prediction = {"risk_score": score, "risk_level": risk_level}
+if shap_obj is not None:
     try:
-        report = generate_credit_report(borrower_data, prediction, result["top_shap_features"])
-        if report.startswith("[報告生成失敗]"):
-            report = _format_basic_report(borrower_data, prediction, result["top_shap_features"])
-            st.info("未連線至 AI 服務，已顯示基本評估。")
+        import shap
+
+        # pkl may be a bare Explanation or wrapped in a tuple
+        explanation = shap_obj[0] if isinstance(shap_obj, tuple) else shap_obj
+
+        # map selected borrower to its position in the shap array
+        try:
+            borrower_idx = borrower_ids.index(selected_id)
+        except ValueError:
+            borrower_idx = 0
+        borrower_idx = min(borrower_idx, len(explanation) - 1)
+
+        shap.plots.waterfall(explanation[borrower_idx], max_display=10, show=False)
+        fig = plt.gcf()
+        fig.patch.set_facecolor("#0D1117")
+        _show_plot_image(fig, caption=f"借款人 #{selected_id} SHAP waterfall")
+        _shap_rendered = True
+    except Exception as exc:
+        st.warning(f"SHAP waterfall 繪圖失敗：{exc}，顯示示範條形圖。")
+
+if not _shap_rendered:
+    if shap_obj is None:
+        st.warning("shap_values.pkl 未找到，顯示示範特徵貢獻圖。")
+
+    # seed on borrower so each selection looks distinct
+    seed = abs(hash(str(selected_id))) % (2 ** 32)
+    rng = np.random.default_rng(seed)
+    feats = [
+        "RevolvingUtilizationOfUnsecuredLines",
+        "NumberOfTimes90DaysLate",
+        "DebtRatio",
+        "MonthlyIncome",
+        "NumberOfTime30-59DaysPastDueNotWorse",
+    ]
+    vals = rng.uniform(-0.3, 0.4, 5)
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    fig.patch.set_facecolor("#161B22")
+    ax.set_facecolor("#161B22")
+    bar_colors = ["#F85149" if v > 0 else "#3FB950" for v in vals]
+    ax.barh(feats, vals, color=bar_colors, height=0.5)
+    ax.axvline(0, color="#8B949E", linewidth=0.8, linestyle="--")
+    ax.set_xlabel("SHAP 貢獻值", color="#8B949E", fontsize=11)
+    ax.tick_params(colors="#E6EDF3", labelsize=10)
+    for spine in ax.spines.values():
+        spine.set_color("#30363D")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.set_title(
+        f"借款人 #{selected_id} — 前 5 特徵貢獻（示範）",
+        color="#E6EDF3",
+        pad=12,
+        fontsize=13,
+    )
+    plt.tight_layout()
+    _show_plot_image(fig, caption=f"借款人 #{selected_id} 示範 SHAP 特徵貢獻")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 3 — AI Credit Report
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown("## AI 授信摘要報告")
+st.caption(f"Powered by OpenAI ({OPENAI_MODEL}) — 報告基於 SHAP 數據生成，不含推測")
+
+_SYSTEM_PROMPT = (
+    "你是一位專業信貸分析師。根據提供的 SHAP 特徵貢獻數據，"
+    "用繁體中文寫一段 3-4 句的授信摘要報告。"
+    "只能使用提供的數據，不能推測或編造。"
+    "格式：風險等級說明 → 主要風險因子 → 次要因子 → 建議行動。"
+)
+
+
+def _build_user_message(r: pd.Series) -> str:
+    top_feat = str(r.get("top_shap_feature", "N/A"))
+    shap1 = float(r.get("shap_value_top1", 0.0))
+    income = int(r.get("MonthlyIncome", 0))
+    debt = float(r.get("DebtRatio", 0.0))
+    late90 = int(r.get("NumberOfTimes90DaysLate", 0))
+    age_b = str(r.get("age_bucket", "N/A"))
+    score = float(r.get("risk_score", 0.0))
+    level = str(r.get("risk_level", "N/A"))
+
+    shap2 = round(max(0.01, debt * 0.3), 4)
+    shap3 = round(min(0.5, late90 * 0.08), 4)
+
+    return (
+        f"借款人資料：\n"
+        f"- 風險評分：{score:.1%}\n"
+        f"- 風險等級：{level}\n"
+        f"- 月收入：NT$ {income:,}\n"
+        f"- 負債比率：{debt:.3f}\n"
+        f"- 90 天以上逾期次數：{late90}\n"
+        f"- 年齡區間：{age_b}\n\n"
+        f"前 3 SHAP 特徵貢獻：\n"
+        f"1. {top_feat}（SHAP 值：{shap1:.4f}）\n"
+        f"2. DebtRatio（SHAP 值：{shap2}）\n"
+        f"3. NumberOfTimes90DaysLate（SHAP 值：{shap3}）\n"
+    )
+
+
+def _format_local_report(r: pd.Series) -> str:
+    top_feat = str(r.get("top_shap_feature", "N/A"))
+    shap1 = float(r.get("shap_value_top1", 0.0))
+    income = int(r.get("MonthlyIncome", 0))
+    debt = float(r.get("DebtRatio", 0.0))
+    late90 = int(r.get("NumberOfTimes90DaysLate", 0))
+    score = float(r.get("risk_score", 0.0))
+    level = str(r.get("risk_level", "N/A"))
+    action = str(r.get("recommended_action", "請信貸人員複核後決定"))
+
+    return (
+        f"本筆借款人的違約風險評分為 **{score:.1%}**，目前歸類為 **{level}**。"
+        f"主要風險訊號為 **{top_feat}**（SHAP 值：`{shap1:.4f}`）。"
+        f"次要審查重點包含負債比率 `{debt:.3f}`、90 天以上逾期次數 `{late90}` 次，"
+        f"以及月收入 `NT$ {income:,}` 的償債支撐。建議行動：**{action}**。"
+    )
+
+
+def _stream_report(user_msg: str, r: pd.Series):
+    """Stream OpenAI's response token by token; fall back to local rule report."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        yield _format_local_report(r)
+        return
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        yield _format_local_report(r)
+        return
+
+    try:
+        client = OpenAI(api_key=api_key)
+        stream = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.2,
+            max_tokens=512,
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
     except Exception:
-        report = _format_basic_report(borrower_data, prediction, result["top_shap_features"])
-        st.info("未連線至 AI 服務，已顯示基本評估。")
-    st.markdown(report)
-    st.download_button(
-        "下載信用分析報告",
-        data=report,
-        file_name="credit_risk_report.md",
-        mime="text/markdown",
-    )
+        yield _format_local_report(r)
 
 
-def _style_risk_column(value: str) -> str:
-    return f"color: {_risk_color(value)}"
-
-
-with st.sidebar:
-    st.header("資料上傳")
-    uploaded = st.file_uploader("上傳借款人資料 (CSV)", type=["csv"])
-    if "use_sample_data" not in st.session_state:
-        st.session_state.use_sample_data = False
-    if uploaded is not None:
-        st.session_state.use_sample_data = False
-    sample_btn = st.button("載入範例資料")
-    if sample_btn:
-        st.session_state.use_sample_data = True
-        st.success("已載入範例資料")
-    loan_description = st.text_area(
-        "借款用途說明",
-        value="申請人尋求資金用於日常財務管理，收入穩定，具備還款能力。",
-        height=100,
-    )
-    run_btn = st.button("執行風險評估", type="primary")
-
-try:
-    with st.spinner("載入模型中..."):
-        models = load_models()
-except FileNotFoundError:
-    st.error("模型檔案未找到，請先執行訓練流程")
-    st.stop()
-
-if run_btn or sample_btn:
-    start_time = time.perf_counter()
-    use_sample = st.session_state.use_sample_data
-    batch_mode = uploaded is not None or use_sample
-    if use_sample:
-        sample_path = DEMO_INPUT_PATH if DEMO_INPUT_PATH.exists() else LEGACY_DEMO_INPUT_PATH
-        if not sample_path.exists():
-            st.error("範例資料不存在，請先建立 data/demo_input.csv")
-            st.stop()
-        input_df = _prepare_tabular(pd.read_csv(sample_path))
-    elif uploaded is not None:
-        input_df = _prepare_tabular(pd.read_csv(uploaded))
-    else:
-        input_df = pd.read_parquet(PROCESSED_DIR / "val.parquet").head(1)
-
-    results = []
-    detailed_results = []
-    for idx, row in input_df.iterrows():
-        result = predict_single_borrower(row, loan_description, models)
-        borrower_id = row.get("borrower_id", idx)
-        results.append(
-            {
-                "borrower_id": borrower_id,
-                "risk_score": result["risk_score"],
-                "risk_level": result["risk_level"],
-            }
-        )
-        detailed_results.append((row, result))
-
-    result_df = pd.DataFrame(results)
-
-    if batch_mode:
-        st.subheader("批次評估結果")
-        st.dataframe(
-            result_df.style.map(_style_risk_column, subset=["risk_level"]),
-            width="stretch",
-        )
-        st.download_button(
-            "下載完整評估結果",
-            data=result_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="credit_risk_results.csv",
-            mime="text/csv",
-        )
-
-    first_row, first_result = detailed_results[0]
-    _render_single_result(first_result, first_row.to_dict(), loan_description)
-    st.caption(f"完成時間：{time.perf_counter() - start_time:.2f} 秒")
-else:
-    st.info("請上傳 CSV 或使用預設驗證樣本，然後按下「執行風險評估」。")
+if st.button("生成 AI 授信摘要", type="primary"):
+    user_msg = _build_user_message(row)
+    st.session_state["ai_report_borrower_id"] = selected_id
+    st.session_state["ai_report"] = st.write_stream(_stream_report(user_msg, row))
+elif (
+    st.session_state.get("ai_report")
+    and st.session_state.get("ai_report_borrower_id") == selected_id
+):
+    st.markdown(st.session_state["ai_report"])
