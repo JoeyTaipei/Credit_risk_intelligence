@@ -227,6 +227,94 @@ with c3:
 st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 st.progress(risk_score)
 
+# ── AI report helpers (defined here so they're available inside the column) ───
+_SYSTEM_PROMPT = (
+    "你是一位專業信貸分析師。根據提供的 SHAP 特徵貢獻數據，"
+    "用繁體中文寫一段 3-4 句的授信摘要報告。"
+    "只能使用提供的數據，不能推測或編造。"
+    "格式：風險等級說明 → 主要風險因子 → 次要因子 → 建議行動。"
+)
+
+_REPORT_STYLE = (
+    'font-size:1.25rem;line-height:1.9;padding:22px 26px;'
+    'background:#161B22;border-radius:10px;border:1px solid #30363D;'
+)
+
+
+def _build_user_message(r: pd.Series) -> str:
+    top_feat = str(r.get("top_shap_feature", "N/A"))
+    shap1 = float(r.get("shap_value_top1", 0.0))
+    income = int(r.get("MonthlyIncome", 0))
+    debt = float(r.get("DebtRatio", 0.0))
+    late90 = int(r.get("NumberOfTimes90DaysLate", 0))
+    age_b = str(r.get("age_bucket", "N/A"))
+    score = float(r.get("risk_score", 0.0))
+    level = str(r.get("risk_level", "N/A"))
+    shap2 = round(max(0.01, debt * 0.3), 4)
+    shap3 = round(min(0.5, late90 * 0.08), 4)
+    return (
+        f"借款人資料：\n"
+        f"- 風險評分：{score:.1%}\n"
+        f"- 風險等級：{level}\n"
+        f"- 月收入：NT$ {income:,}\n"
+        f"- 負債比率：{debt:.3f}\n"
+        f"- 90 天以上逾期次數：{late90}\n"
+        f"- 年齡區間：{age_b}\n\n"
+        f"前 3 SHAP 特徵貢獻：\n"
+        f"1. {top_feat}（SHAP 值：{shap1:.4f}）\n"
+        f"2. DebtRatio（SHAP 值：{shap2}）\n"
+        f"3. NumberOfTimes90DaysLate（SHAP 值：{shap3}）\n"
+    )
+
+
+def _format_local_report(r: pd.Series) -> str:
+    top_feat = str(r.get("top_shap_feature", "N/A"))
+    shap1 = float(r.get("shap_value_top1", 0.0))
+    income = int(r.get("MonthlyIncome", 0))
+    debt = float(r.get("DebtRatio", 0.0))
+    late90 = int(r.get("NumberOfTimes90DaysLate", 0))
+    score = float(r.get("risk_score", 0.0))
+    level = str(r.get("risk_level", "N/A"))
+    action = str(r.get("recommended_action", "請信貸人員複核後決定"))
+    return (
+        f"本筆借款人的違約風險評分為 **{score:.1%}**，目前歸類為 **{level}**。"
+        f"主要風險訊號為 **{top_feat}**（SHAP 值：`{shap1:.4f}`）。"
+        f"次要審查重點包含負債比率 `{debt:.3f}`、90 天以上逾期次數 `{late90}` 次，"
+        f"以及月收入 `NT$ {income:,}` 的償債支撐。建議行動：**{action}**。"
+    )
+
+
+def _stream_report(user_msg: str, r: pd.Series):
+    """Stream OpenAI's response token by token; fall back to local rule report."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        yield _format_local_report(r)
+        return
+    try:
+        from openai import OpenAI
+    except ImportError:
+        yield _format_local_report(r)
+        return
+    try:
+        client = OpenAI(api_key=api_key)
+        stream = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.2,
+            max_tokens=512,
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+    except Exception:
+        yield _format_local_report(r)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sections 2 + 3 — side-by-side: AI report (left) | SHAP chart (right)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -294,119 +382,27 @@ with col_report:
     st.markdown("## AI 授信摘要報告")
     st.caption(f"Powered by OpenAI ({OPENAI_MODEL}) — 報告基於 SHAP 數據生成，不含推測")
 
-_SYSTEM_PROMPT = (
-    "你是一位專業信貸分析師。根據提供的 SHAP 特徵貢獻數據，"
-    "用繁體中文寫一段 3-4 句的授信摘要報告。"
-    "只能使用提供的數據，不能推測或編造。"
-    "格式：風險等級說明 → 主要風險因子 → 次要因子 → 建議行動。"
-)
-
-
-def _build_user_message(r: pd.Series) -> str:
-    top_feat = str(r.get("top_shap_feature", "N/A"))
-    shap1 = float(r.get("shap_value_top1", 0.0))
-    income = int(r.get("MonthlyIncome", 0))
-    debt = float(r.get("DebtRatio", 0.0))
-    late90 = int(r.get("NumberOfTimes90DaysLate", 0))
-    age_b = str(r.get("age_bucket", "N/A"))
-    score = float(r.get("risk_score", 0.0))
-    level = str(r.get("risk_level", "N/A"))
-
-    shap2 = round(max(0.01, debt * 0.3), 4)
-    shap3 = round(min(0.5, late90 * 0.08), 4)
-
-    return (
-        f"借款人資料：\n"
-        f"- 風險評分：{score:.1%}\n"
-        f"- 風險等級：{level}\n"
-        f"- 月收入：NT$ {income:,}\n"
-        f"- 負債比率：{debt:.3f}\n"
-        f"- 90 天以上逾期次數：{late90}\n"
-        f"- 年齡區間：{age_b}\n\n"
-        f"前 3 SHAP 特徵貢獻：\n"
-        f"1. {top_feat}（SHAP 值：{shap1:.4f}）\n"
-        f"2. DebtRatio（SHAP 值：{shap2}）\n"
-        f"3. NumberOfTimes90DaysLate（SHAP 值：{shap3}）\n"
-    )
-
-
-def _format_local_report(r: pd.Series) -> str:
-    top_feat = str(r.get("top_shap_feature", "N/A"))
-    shap1 = float(r.get("shap_value_top1", 0.0))
-    income = int(r.get("MonthlyIncome", 0))
-    debt = float(r.get("DebtRatio", 0.0))
-    late90 = int(r.get("NumberOfTimes90DaysLate", 0))
-    score = float(r.get("risk_score", 0.0))
-    level = str(r.get("risk_level", "N/A"))
-    action = str(r.get("recommended_action", "請信貸人員複核後決定"))
-
-    return (
-        f"本筆借款人的違約風險評分為 **{score:.1%}**，目前歸類為 **{level}**。"
-        f"主要風險訊號為 **{top_feat}**（SHAP 值：`{shap1:.4f}`）。"
-        f"次要審查重點包含負債比率 `{debt:.3f}`、90 天以上逾期次數 `{late90}` 次，"
-        f"以及月收入 `NT$ {income:,}` 的償債支撐。建議行動：**{action}**。"
-    )
-
-
-def _stream_report(user_msg: str, r: pd.Series):
-    """Stream OpenAI's response token by token; fall back to local rule report."""
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        yield _format_local_report(r)
-        return
-
-    try:
-        from openai import OpenAI
-    except ImportError:
-        yield _format_local_report(r)
-        return
-
-    try:
-        client = OpenAI(api_key=api_key)
-        stream = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.2,
-            max_tokens=512,
-            stream=True,
-        )
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
-    except Exception:
-        yield _format_local_report(r)
-
-
-_REPORT_STYLE = (
-    'font-size:1.25rem;line-height:1.9;padding:22px 26px;'
-    'background:#161B22;border-radius:10px;border:1px solid #30363D;'
-)
-
-if st.button("生成 AI 授信摘要", type="primary"):
-    user_msg = _build_user_message(row)
-    placeholder = st.empty()
-    full_text = ""
-    for chunk in _stream_report(user_msg, row):
-        full_text += chunk
+    if st.button("生成 AI 授信摘要", type="primary"):
+        user_msg = _build_user_message(row)
+        placeholder = st.empty()
+        full_text = ""
+        for chunk in _stream_report(user_msg, row):
+            full_text += chunk
+            placeholder.markdown(
+                f'<div style="{_REPORT_STYLE}">{full_text}▌</div>',
+                unsafe_allow_html=True,
+            )
         placeholder.markdown(
-            f'<div style="{_REPORT_STYLE}">{full_text}▌</div>',
+            f'<div style="{_REPORT_STYLE}">{full_text}</div>',
             unsafe_allow_html=True,
         )
-    placeholder.markdown(
-        f'<div style="{_REPORT_STYLE}">{full_text}</div>',
-        unsafe_allow_html=True,
-    )
-    st.session_state["ai_report"] = full_text
-    st.session_state["ai_report_borrower_id"] = selected_id
-elif (
-    st.session_state.get("ai_report")
-    and st.session_state.get("ai_report_borrower_id") == selected_id
-):
-    st.markdown(
-        f'<div style="{_REPORT_STYLE}">{st.session_state["ai_report"]}</div>',
-        unsafe_allow_html=True,
-    )
+        st.session_state["ai_report"] = full_text
+        st.session_state["ai_report_borrower_id"] = selected_id
+    elif (
+        st.session_state.get("ai_report")
+        and st.session_state.get("ai_report_borrower_id") == selected_id
+    ):
+        st.markdown(
+            f'<div style="{_REPORT_STYLE}">{st.session_state["ai_report"]}</div>',
+            unsafe_allow_html=True,
+        )
