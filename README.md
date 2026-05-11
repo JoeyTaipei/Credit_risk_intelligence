@@ -1,5 +1,7 @@
 # 信用風險智能評估系統
 
+**Streamlit Demo:** https://creditriskintelligence-jaxjumckv583zulzvweieh.streamlit.app/
+
 > 一套結合結構化表格、月度時序、借款人關係圖與貸款文字描述的多模態信用風險分類系統，透過四個獨立 Encoder 的 Late Fusion 架構輸出違約機率、SHAP 可解釋性報告與 Claude Opus 4.7 信貸分析，適用於金融機構的輔助信貸審核情境。
 
 ---
@@ -14,33 +16,7 @@
 
 ## 系統架構
 
-```mermaid
-flowchart TB
-  subgraph 資料來源
-    A[GiveMeSomeCredit\n1,200 rows 樣本]
-    B[合成時序資料\n12-month sequences]
-    C[借款人關係圖\n840 nodes 10408 edges]
-    D[合成貸款說明\n5000 loan descriptions]
-  end
-  subgraph 四大 Encoder
-    E[XGBoost\nLeaf Embedding]
-    F[LSTM Encoder\nval AUC 0.72]
-    G[GraphSAGE\nval AUC 0.74]
-    H[sentence-BERT\nfrozen MiniLM]
-  end
-  subgraph 融合與輸出
-    I[Late Fusion\nMLP Classifier]
-    J[SHAP 可解釋性]
-    K[GenAI 信用報告\nClaude Opus 4.7]
-    L[Streamlit Dashboard]
-  end
-  A-->E
-  B-->F
-  C-->G
-  D-->H
-  E & F & G & H --> I
-  I --> J & K --> L
-```
+![系統架構圖](docs/figures/Architecture.png)
 
 ---
 
