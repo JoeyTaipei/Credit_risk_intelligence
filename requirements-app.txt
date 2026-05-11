@@ -1,7 +1,0 @@
-streamlit
-pandas
-numpy<2
-matplotlib
-shap
-openai>=1.0
-python-dotenv
