@@ -121,12 +121,31 @@ def _risk_hex(score: float) -> str:
     return "#D29922" if score < 0.6 else "#F85149"   # yellow / red
 
 
+def _apply_dark_theme(fig) -> None:
+    """Set all axes text and spines to light colours for the dark background."""
+    for ax in fig.axes:
+        ax.set_facecolor("#0D1117")
+        ax.tick_params(colors="#E6EDF3", labelsize=10)
+        ax.xaxis.label.set_color("#E6EDF3")
+        ax.yaxis.label.set_color("#E6EDF3")
+        for spine in ax.spines.values():
+            spine.set_color("#30363D")
+        for text in ax.texts:
+            text.set_color("#E6EDF3")
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            label.set_color("#E6EDF3")
+        try:
+            ax.title.set_color("#E6EDF3")
+        except Exception:
+            pass
+
+
 def _show_plot_image(fig, caption: str | None = None) -> None:
     """Render matplotlib output as a PNG image so Streamlit always receives an image."""
     buffer = BytesIO()
-    fig.savefig(buffer, format="png", dpi=160, bbox_inches="tight", facecolor=fig.get_facecolor())
+    fig.savefig(buffer, format="png", dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
     buffer.seek(0)
-    st.image(buffer, caption=caption, use_container_width=True)
+    st.image(buffer, caption=caption, width=680)
     plt.close(fig)
 
 
@@ -233,6 +252,7 @@ if shap_obj is not None:
         shap.plots.waterfall(explanation[borrower_idx], max_display=10, show=False)
         fig = plt.gcf()
         fig.patch.set_facecolor("#0D1117")
+        _apply_dark_theme(fig)
         _show_plot_image(fig, caption=f"借款人 #{selected_id} SHAP waterfall")
         _shap_rendered = True
     except Exception as exc:
@@ -369,12 +389,32 @@ def _stream_report(user_msg: str, r: pd.Series):
         yield _format_local_report(r)
 
 
+_REPORT_STYLE = (
+    'font-size:1.15rem;line-height:1.85;padding:20px 24px;'
+    'background:#161B22;border-radius:10px;border:1px solid #30363D;'
+)
+
 if st.button("生成 AI 授信摘要", type="primary"):
     user_msg = _build_user_message(row)
+    placeholder = st.empty()
+    full_text = ""
+    for chunk in _stream_report(user_msg, row):
+        full_text += chunk
+        placeholder.markdown(
+            f'<div style="{_REPORT_STYLE}">{full_text}▌</div>',
+            unsafe_allow_html=True,
+        )
+    placeholder.markdown(
+        f'<div style="{_REPORT_STYLE}">{full_text}</div>',
+        unsafe_allow_html=True,
+    )
+    st.session_state["ai_report"] = full_text
     st.session_state["ai_report_borrower_id"] = selected_id
-    st.session_state["ai_report"] = st.write_stream(_stream_report(user_msg, row))
 elif (
     st.session_state.get("ai_report")
     and st.session_state.get("ai_report_borrower_id") == selected_id
 ):
-    st.markdown(st.session_state["ai_report"])
+    st.markdown(
+        f'<div style="{_REPORT_STYLE}">{st.session_state["ai_report"]}</div>',
+        unsafe_allow_html=True,
+    )
