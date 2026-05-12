@@ -11,6 +11,7 @@
 - **四模態 Late Fusion 架構** — XGBoost（表格）、Bi-LSTM（時序）、GraphSAGE（圖）、sentence-BERT（文字）各自學習模態專屬表示，再於決策層拼接為 128 維向量，兼顧模態獨立性與跨模態推理
 - **完整可解釋性鏈路** — XGBoost SHAP 在特徵層給出「哪個欄位推高了風險」，Fusion SHAP 在模態層給出「哪個 Encoder 貢獻最大」，Claude Opus 4.7 將上述結果翻譯成信貸員可讀的中文敘事報告
 - **模組化 Pipeline，實際資料可無縫替換** — 每個 Encoder 以固定的 (batch, 32) 向量介面對外，合成資料換成真實還款紀錄、CRM 關係圖、真實申請書時，Fusion 層完全不需修改
+- **真實 Lending Club 資料整合** — 226 萬筆 Lending Club 貸款紀錄透過標準攤銷公式重建 12 月還款軌跡；採嚴格時間切割（前 10 月輸入、後 2 月為標籤）防止資料洩漏，LSTM Val AUC 達 0.9733，驗證序列型逾期具強序列相關性
 
 ---
 
@@ -38,15 +39,18 @@
 
 ## 實驗結果
 
-| 模組 | 方法 | Val AUC | 備註 |
-|---|---|---|---|
-| Tabular Baseline | XGBoost | 0.67 | 1,200 row 樣本，40% 正例率（非原始 6.7%）|
-| 時序模組 | Bi-LSTM (PyTorch) | 0.72 | 合成時序，12 月滑動視窗 |
-| 圖模組 | GraphSAGE (PyG) | 0.74 | 合成相似圖，threshold=0.85 |
-| 文字模組 | frozen sentence-BERT | — | 固定 Encoder，不評估單獨 AUC |
-| 融合模型 | Late Fusion MLP | — | 需完整 150K 資料集重測 |
+| 模組 | 方法 | 資料來源 | Val AUC | 備註 |
+|---|---|---|---|---|
+| Tabular Baseline | XGBoost | GiveMeSomeCredit | 0.67 | 1,200 row 樣本，40% 正例率 |
+| 時序模組 | Bi-LSTM | 合成時序 | 0.72 | 12 月滑動視窗 |
+| 時序模組 | Bi-LSTM | **Lending Club（真實）** | **0.9733** | 前 10 月→預測第 11–12 月逾期；AUC 高反映序列逾期強相關¹ |
+| 圖模組 | GraphSAGE (PyG) | 合成相似圖 | 0.74 | threshold=0.85 |
+| 文字模組 | frozen sentence-BERT | 合成申請書 | — | 固定 Encoder，不評估單獨 AUC |
+| 融合模型 | Late Fusion MLP | 混合 | — | 支援 `--lstm_source lending_club` 替換時序 Encoder |
 
-> **注意：** 本 demo 使用的 `cs-training.csv` 為 1,200 筆樣本檔，正例率 40.2%，與原始 GiveMeSomeCredit（150K 筆，6.7% 正例率）的分佈不同。所有數字為架構驗證用，不代表在真實信貸資料上的預測表現。
+> ¹ **LC LSTM AUC 說明：** 0.9733 反映真實逾期行為的強序列相關性——90.5% 標籤為正例的借款人在輸入視窗中已出現至少一次逾期旗標。模型學到的核心規則是「近期逾期 → 持續逾期」，符合早期預警系統的業務邏輯，但並非一般意義的預測困難任務。
+>
+> **注意：** 本 demo 使用的 `cs-training.csv` 為 1,200 筆樣本檔，正例率 40.2%，與原始 GiveMeSomeCredit（150K 筆，6.7% 正例率）的分佈不同。所有數字為架構驗證用，不代表在真實信貸資料上的最終表現。
 
 ---
 
@@ -77,12 +81,18 @@ cp .env.example .env
 # 3. 下載資料（需 Kaggle API Token）
 python -m src.data.download --target all
 
-# 4. 訓練各模組
+# 4. 訓練各模組（合成資料，預設路徑）
 python -m src.training.train_loop --stage xgb
 python -m src.training.train_loop --stage lstm
 python -m src.training.train_loop --stage gnn
 python -m src.training.train_loop --stage text
 python -m src.training.train_loop --stage fusion
+
+# 4b. （選用）以真實 Lending Club 資料訓練時序模組與融合模型
+#     需先將 loan.csv 放入 data/raw/
+python -m src.data.lending_club_timeseries          # 建立 lc_sequences.pt（10 萬筆）
+python -m src.training.train_lstm --data_source lending_club
+python -m src.training.train_fusion --lstm_source lending_club
 
 # 5. 啟動 Streamlit 介面
 streamlit run app/streamlit_app.py
@@ -107,18 +117,22 @@ credit-risk-intelligence/
 │   └── 面試講法_complete.md      # 面試答題速查
 ├── src/
 │   ├── data/
-│   │   ├── preprocess.py         # 清洗、時序生成
-│   │   ├── graph_builder.py      # 借款人相似圖建構
-│   │   └── text_preprocessor.py # 文字對齊與備援邏輯
+│   │   ├── preprocess.py              # 清洗、合成時序生成
+│   │   ├── lending_club_timeseries.py # LC 真實還款軌跡重建（攤銷公式）
+│   │   ├── graph_builder.py           # 借款人相似圖建構
+│   │   └── text_preprocessor.py      # 文字對齊與備援邏輯
 │   ├── models/
-│   │   ├── xgb_baseline.py       # XGBoost + SHAP
-│   │   ├── lstm_encoder.py       # Bi-LSTM Encoder
-│   │   ├── gnn_encoder.py        # GraphSAGE Encoder
-│   │   ├── text_encoder.py       # sentence-BERT 投影頭
-│   │   └── fusion.py             # Late Fusion MLP + leaf embedding
-│   ├── training/                 # 各模態訓練入口
-│   ├── inference/                # 單筆推論、SHAP、報告生成
-│   └── utils/                    # SHAP 視覺化、Claude Opus 封裝
+│   │   ├── xgb_baseline.py            # XGBoost + SHAP
+│   │   ├── lstm_encoder.py            # Bi-LSTM Encoder
+│   │   ├── gnn_encoder.py             # GraphSAGE Encoder
+│   │   ├── text_encoder.py            # sentence-BERT 投影頭
+│   │   └── fusion.py                  # Late Fusion MLP + leaf embedding
+│   ├── training/
+│   │   ├── train_loop.py              # 各模態訓練主入口
+│   │   ├── train_lstm.py              # --data_source [synthetic|lending_club]
+│   │   └── train_fusion.py            # --lstm_source [synthetic|lending_club]
+│   ├── inference/                     # 單筆推論、SHAP、報告生成
+│   └── utils/                         # SHAP 視覺化、Claude Opus 封裝
 ├── tests/
 ├── pyproject.toml
 └── requirements.txt
