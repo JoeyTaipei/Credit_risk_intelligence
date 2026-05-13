@@ -37,6 +37,16 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 PREDICTIONS_PATH = PROCESSED_DIR / "predictions.csv"
 SHAP_PATH = PROCESSED_DIR / "shap_values.pkl"
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+MODEL_VERSION_CONFIG = {
+    "原版（Demo）": {
+        "fusion": PROCESSED_DIR / "fusion_model.pt",
+        "lstm": PROCESSED_DIR / "lstm_encoder.pt",
+    },
+    "調優版（150K）": {
+        "fusion": PROCESSED_DIR / "fusion_model_lc.pt",
+        "lstm": PROCESSED_DIR / "lstm_encoder_lc.pt",
+    },
+}
 
 # ── page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -114,6 +124,22 @@ def load_shap_data():
         return None
 
 
+@st.cache_resource
+def load_model_artifacts(fusion_path: str, lstm_path: str):
+    """Load selected model checkpoint files so the sidebar version is active."""
+    try:
+        import torch
+    except ImportError:
+        return None
+
+    try:
+        fusion = torch.load(fusion_path, map_location="cpu") if Path(fusion_path).exists() else None
+        lstm = torch.load(lstm_path, map_location="cpu") if Path(lstm_path).exists() else None
+        return {"fusion": fusion, "lstm": lstm}
+    except Exception:
+        return None
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _risk_hex(score: float) -> str:
     if score < 0.3:
@@ -155,6 +181,21 @@ shap_obj = load_shap_data()
 
 # ── sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
+    st.markdown("## 模型版本")
+    model_version = st.radio(
+        "模型版本",
+        options=list(MODEL_VERSION_CONFIG),
+        label_visibility="collapsed",
+    )
+    selected_model_paths = MODEL_VERSION_CONFIG[model_version]
+    model_artifacts = load_model_artifacts(
+        str(selected_model_paths["fusion"]),
+        str(selected_model_paths["lstm"]),
+    )
+    if model_artifacts is None:
+        st.caption("模型檔案未載入（PyTorch 未安裝或格式不相容）")
+
+    st.markdown("---")
     st.markdown("## 借款人選擇")
     borrower_ids = predictions_df["borrower_id"].tolist()
     selected_id = st.selectbox(
@@ -226,6 +267,8 @@ with c3:
 
 st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 st.progress(risk_score)
+st.caption(f"評分模型版本：{model_version}")
+st.caption("表格 Ensemble OOF AUC 0.866 · 時序 Val AUC 0.97")
 
 # ── AI report helpers (defined here so they're available inside the column) ───
 _SYSTEM_PROMPT = (

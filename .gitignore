@@ -65,6 +65,7 @@ data/synthetic/
 *.pth
 *.log
 .streamlit/secrets.toml
+catboost_info/
 
 # Allow pre-generated demo outputs for Streamlit Cloud
 !data/processed/predictions.csv
