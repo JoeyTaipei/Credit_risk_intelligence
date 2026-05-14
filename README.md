@@ -1,6 +1,8 @@
 # 信用風險智能評估系統
 ### Credit Risk Intelligence System
 
+**Live Demo:** [creditriskintelligence-jaxjumckv583zulzvweieh.streamlit.app](https://creditriskintelligence-jaxjumckv583zulzvweieh.streamlit.app/)
+
 > 一套以表格集成模型為核心、搭配多模態原型架構的信用違約預測系統。核心表格模型在 150K 真實借款人資料上達到 OOF AUC **0.866**；多模態融合模組（時序、圖、文字）為架構驗證階段的實驗性原型。
 
 ---
