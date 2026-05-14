@@ -57,7 +57,7 @@ env/
 # Project data and artifacts
 outputs/
 data/raw/
-data/processed/
+data/processed/*
 data/synthetic/
 *.pkl
 *.joblib
@@ -70,3 +70,12 @@ catboost_info/
 # Allow pre-generated demo outputs for Streamlit Cloud
 !data/processed/predictions.csv
 !data/processed/shap_values.pkl
+!data/processed/fusion_model.pt
+!data/processed/fusion_model_aligned.pt
+!data/processed/lstm_encoder.pt
+!data/processed/xgb_fold_1.pkl
+!data/processed/xgb_fold_2.pkl
+!data/processed/xgb_fold_3.pkl
+!data/processed/xgb_fold_4.pkl
+!data/processed/xgb_fold_5.pkl
+!data/processed/ensemble_weights.json

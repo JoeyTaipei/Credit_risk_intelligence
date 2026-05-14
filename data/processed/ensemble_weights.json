@@ -1,0 +1,15 @@
+{
+  "data_path": "data\\raw\\cs-training2.csv",
+  "individual_auc": {
+    "xgb": 0.864915560522687,
+    "lgbm": 0.8651864945530537,
+    "catboost": 0.8656611461653909
+  },
+  "grid_auc": 0.8658184034178579,
+  "ensemble_auc": 0.8658184034178579,
+  "weights": {
+    "xgb": 0.1,
+    "lgbm": 0.1,
+    "catboost": 0.8
+  }
+}
