@@ -26,10 +26,13 @@
 | **表格（核心）** | CatBoost | GiveMeSomeCredit 150K | 0.8657 | 同上 |
 | **表格（核心）** | **三模型 Ensemble** | GiveMeSomeCredit 150K | **0.8658** | CatBoost 80% 權重 |
 | 時序（原型）| Bi-LSTM 合成 | Bernoulli 合成序列 | 0.72 | 已升級，列為參考 |
-| **時序（原型）** | **Bi-LSTM 真實** | Lending Club 100K | **0.97** | 序列相關性驗證；與表格資料集不同 |
-| 圖（原型）| GraphSAGE | 合成 Cosine 相似圖 | 0.74 | 非真實擔保關係 |
+| **時序（原型）** | **Bi-LSTM 真實** | Lending Club 100K | **0.97** | 序列相關性驗證 |
+| 圖（原型）| GraphSAGE | 合成 Cosine 相似圖 150K | — | 1,931,856 條邊，無 zero fallback |
 | 文字（原型）| frozen sentence-BERT | 合成貸款描述 | — | 無獨立監督標籤 |
-| **Fusion（原型）** | Late Fusion MLP | 混合，未對齊 | **0.74** | 架構驗證，非生產指標 |
+| Late Fusion（未對齊）| Late Fusion MLP | 混合資料集 | 0.74 | 資料污染，非架構問題 |
+| **Aligned Fusion v0** | **Late Fusion MLP** | **同一批 150K 借款人** | **0.8643** | 四模態真正對齊後的系統級指標 |
+
+**核心發現：** 對齊後 Fusion 0.74 → **0.864**。差距來自資料污染，不是 Late Fusion 架構本身。
 
 ---
 
@@ -111,27 +114,20 @@ Text        → sentence-BERT        → 32-dim  ┘
 
 ---
 
-## 已知限制與模態對齊問題
+## 已知限制
 
-### 核心限制
+### Aligned Fusion v0 的合成資料限制
 
-**借款人 ID 未對齊：**
-現階段四個模態使用不同資料集，Fusion 層拼接的是「來自不同借款人群體的向量」，而非同一批借款人的多角度表示。
+四個模態已對齊到同一批 150K 借款人，但時序、圖、文字仍使用合成資料：
 
 ```
-XGBoost Embedding  → GiveMeSomeCredit 借款人（1,200筆舊版）
-LSTM Embedding     → Lending Club 借款人（不同資料集）
-GraphSAGE          → 合成相似圖節點
-Text Embedding     → 合成貸款描述
+Tabular     → GiveMeSomeCredit 真實特徵   ✅ 真實
+Time Series → cs-training2.csv 合成序列   ⚠️ Bernoulli，無序列相關性
+Graph       → Cosine 相似度合成圖         ⚠️ 非真實擔保關係
+Text        → 模板生成描述               ⚠️ 語意多樣性有限
 ```
 
-因此，**Fusion AUC 0.74 是架構可行性的驗證指標，不是系統整體預測能力的代表數字。**
-
-### 其他限制
-
-- 圖模型的邊代表特徵 Cosine 相似度，不代表真實擔保或共同借款關係
-- 文字模板生成，sentence-BERT Embedding 因句型相似而聚集，區辨能力被低估
-- 表格 Encoder 的 Leaf Embedding 仍使用 1,200 筆舊版資料生成
+因此 Aligned Fusion AUC 0.864 ≈ 表格 Ensemble 0.866，代表合成模態帶入的信號與表格高度重疊，沒有額外貢獻。這是資料限制，不是架構限制。
 
 ---
 
@@ -220,4 +216,5 @@ streamlit run app/streamlit_app.py
 ## 作者
 
 **Joey Wu（巫佳樺）**
-Georgia Tech OMSA
+Georgia Tech OMSA | Civil Engineering → Data Science
+[github.com/JoeyTaipei/Credit_risk_intelligence](https://github.com/JoeyTaipei/Credit_risk_intelligence)
