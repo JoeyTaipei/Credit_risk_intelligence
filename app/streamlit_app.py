@@ -218,15 +218,6 @@ with st.sidebar:
         _model_artifacts = None
         st.caption("模式：Demo（預先計算結果）")
 
-    st.markdown("---")
-    st.markdown("### Demo QR")
-    qr_png = build_qr_code(APP_QR_URL)
-    if qr_png is None:
-        st.info("Install the qrcode package to display the QR code.")
-    else:
-        st.image(qr_png, width=160)
-    st.caption(f"{APP_QR_LABEL}: {APP_QR_URL}")
-
     is_ensemble = False
     st.markdown("---")
     st.markdown("## 借款人選擇")
@@ -246,12 +237,19 @@ with st.sidebar:
     st.metric("年齡區間 (age_bucket)", str(row["age_bucket"]))
 
 # ── page header ───────────────────────────────────────────────────────────────
-st.title("信用風險智能評估系統")
-st.markdown(
-    '<p style="font-size:1.2rem;color:#8B949E;margin-top:-12px;">'
-    "Multi-Modal AI Pipeline: Tabular + Time Series + Graph + NLP</p>",
-    unsafe_allow_html=True,
-)
+_col_title, _col_qr = st.columns([3, 1])
+with _col_title:
+    st.title("信用風險智能評估系統")
+    st.markdown(
+        '<p style="font-size:1.2rem;color:#8B949E;margin-top:-12px;">'
+        "Multi-Modal AI Pipeline: Tabular + Time Series + Graph + NLP</p>",
+        unsafe_allow_html=True,
+    )
+with _col_qr:
+    _qr_png = build_qr_code(APP_QR_URL)
+    if _qr_png:
+        st.image(_qr_png, width=140)
+        st.caption(APP_QR_LABEL)
 
 if is_synthetic:
     st.warning(
