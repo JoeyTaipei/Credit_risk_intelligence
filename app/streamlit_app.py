@@ -63,6 +63,8 @@ st.markdown(
     .stApp { background-color: #0D1117; color: #E6EDF3; }
     section[data-testid="stSidebar"] { background-color: #161B22; }
     section[data-testid="stSidebar"] .stMarkdown { color: #E6EDF3; }
+    section[data-testid="stSidebar"] label { color: #E6EDF3 !important; }
+    section[data-testid="stSidebar"] .stRadio label p { color: #E6EDF3 !important; }
     [data-testid="stMetric"] { background: #161B22; border-radius: 8px; padding: 12px; }
     [data-testid="stMetricLabel"] { color: #8B949E !important; }
     [data-testid="stMetricValue"] { color: #E6EDF3 !important; }
@@ -283,7 +285,11 @@ with st.sidebar:
 
 # ── page header ───────────────────────────────────────────────────────────────
 st.title("信用風險智能評估系統")
-st.caption("Multi-Modal AI Pipeline: Tabular + Time Series + Graph + NLP")
+st.markdown(
+    '<p style="font-size:1.2rem;color:#8B949E;margin-top:-12px;">'
+    "Multi-Modal AI Pipeline: Tabular + Time Series + Graph + NLP</p>",
+    unsafe_allow_html=True,
+)
 
 if is_synthetic:
     st.warning(
