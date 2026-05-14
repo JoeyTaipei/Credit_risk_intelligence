@@ -37,18 +37,9 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 PREDICTIONS_PATH = PROCESSED_DIR / "predictions.csv"
 SHAP_PATH = PROCESSED_DIR / "shap_values.pkl"
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-MODEL_VERSION_CONFIG = {
-    "原版 Fusion（Demo）": {
-        "fusion": PROCESSED_DIR / "fusion_model.pt",
-        "lstm": PROCESSED_DIR / "lstm_encoder.pt",
-    },
-    "Aligned Fusion v0（推薦）": {
-        "fusion": PROCESSED_DIR / "fusion_model_aligned.pt",
-        "lstm": None,
-    },
-}
-ENSEMBLE_PKL_PATHS = [PROCESSED_DIR / f"xgb_fold_{i}.pkl" for i in range(1, 6)]
-ENSEMBLE_WEIGHTS_PATH = PROCESSED_DIR / "ensemble_weights.json"
+FUSION_ALIGNED_PATH = PROCESSED_DIR / "fusion_model_aligned.pt"
+FUSION_BASE_PATH = PROCESSED_DIR / "fusion_model.pt"
+LSTM_PATH = PROCESSED_DIR / "lstm_encoder.pt"
 
 # ── page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -143,25 +134,6 @@ def load_fusion_artifacts(fusion_path: str, lstm_path: str):
         return None
 
 
-@st.cache_resource
-def load_ensemble_artifacts():
-    """Load tabular ensemble 5-fold models and blending weights."""
-    import json
-    try:
-        models = []
-        for p in ENSEMBLE_PKL_PATHS:
-            if not p.exists():
-                return None
-            with p.open("rb") as fh:
-                models.append(pickle.load(fh))
-        weights = None
-        if ENSEMBLE_WEIGHTS_PATH.exists():
-            with ENSEMBLE_WEIGHTS_PATH.open() as fh:
-                weights = json.load(fh)
-        return {"models": models, "weights": weights}
-    except Exception:
-        return None
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _risk_hex(score: float, is_ensemble: bool = False) -> str:
@@ -205,67 +177,20 @@ shap_obj = load_shap_data()
 
 # ── sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 選擇模型版本")
-    _ensemble_available = all(p.exists() for p in ENSEMBLE_PKL_PATHS)
-    _model_options = list(MODEL_VERSION_CONFIG)
-    if _ensemble_available:
-        _model_options.append("表格 Ensemble（最強）")
-
-    model_version = st.radio(
-        "選擇模型版本",
-        options=_model_options,
-        index=min(1, len(_model_options) - 1),
-        label_visibility="collapsed",
-    )
-
-    if not _ensemble_available:
-        st.info("Ensemble 模型未載入")
-
-    if model_version == "Aligned Fusion v0（推薦）":
-        st.markdown(
-            '<div style="background:#161B22;border:1px solid #30363D;border-radius:8px;'
-            'padding:12px;font-size:0.82rem;line-height:1.8;margin-top:8px;">'
-            '<b>Aligned Fusion v0</b><br>'
-            'Val AUC:&nbsp;&nbsp;&nbsp;&nbsp;<b>0.864</b><br>'
-            'Val PR-AUC:&nbsp;<b>0.390</b><br>'
-            '資料: GiveMeSomeCredit 150K<br>'
-            '模態: 表格✅ 時序⚠️ 圖⚠️ 文字⚠️<br>'
-            '<span style="color:#D29922;">⚠️ 時序/圖/文字為合成資料</span>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-    elif model_version == "表格 Ensemble（最強）":
-        st.markdown(
-            '<div style="background:#161B22;border:1px solid #30363D;border-radius:8px;'
-            'padding:12px;font-size:0.82rem;line-height:1.8;margin-top:8px;">'
-            '<b>三模型 Ensemble</b><br>'
-            'OOF AUC: <b>0.866</b><br>'
-            '資料: GiveMeSomeCredit 150K<br>'
-            'Optuna調優 · Stratified 5-Fold'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-    is_ensemble = model_version == "表格 Ensemble（最強）"
-    if is_ensemble:
-        _ensemble_artifacts = load_ensemble_artifacts()
+    if FUSION_ALIGNED_PATH.exists():
+        model_version = "Aligned Fusion v0 · Val AUC 0.864"
+        _model_artifacts = load_fusion_artifacts(str(FUSION_ALIGNED_PATH), "")
+        st.caption("模型：Aligned Fusion v0 · Val AUC 0.864")
+    elif FUSION_BASE_PATH.exists():
+        model_version = "原版 Fusion（Demo）"
+        _model_artifacts = load_fusion_artifacts(str(FUSION_BASE_PATH), str(LSTM_PATH))
+        st.caption("模型：原版 Fusion（Demo）")
     else:
-        _use_fallback = (
-            model_version == "Aligned Fusion v0（推薦）"
-            and not (PROCESSED_DIR / "fusion_model_aligned.pt").exists()
-        )
-        _fusion_path = str(
-            PROCESSED_DIR / "fusion_model.pt" if _use_fallback
-            else MODEL_VERSION_CONFIG[model_version]["fusion"]
-        )
-        _lstm_val = MODEL_VERSION_CONFIG[model_version]["lstm"]
-        _lstm_path = str(_lstm_val) if _lstm_val else ""
-        _model_artifacts = load_fusion_artifacts(_fusion_path, _lstm_path)
-        if _use_fallback:
-            st.warning("fusion_model_aligned.pt 未找到，已退回使用 fusion_model.pt")
-        if _model_artifacts is None:
-            st.caption("模型檔案未載入（PyTorch 未安裝或格式不相容）")
+        model_version = "Demo（預先計算結果）"
+        _model_artifacts = None
+        st.caption("模式：Demo（預先計算結果）")
 
+    is_ensemble = False
     st.markdown("---")
     st.markdown("## 借款人選擇")
     borrower_ids = predictions_df["borrower_id"].tolist()
