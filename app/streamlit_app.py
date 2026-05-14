@@ -37,6 +37,8 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 PREDICTIONS_PATH = PROCESSED_DIR / "predictions.csv"
 SHAP_PATH = PROCESSED_DIR / "shap_values.pkl"
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+APP_QR_URL = os.getenv("APP_QR_URL", "https://creditriskintelligence-jaxjumckv583zulzvweieh.streamlit.app/")
+APP_QR_LABEL = os.getenv("APP_QR_LABEL", "掃描開啟 Demo")
 FUSION_ALIGNED_PATH = PROCESSED_DIR / "fusion_model_aligned.pt"
 FUSION_BASE_PATH = PROCESSED_DIR / "fusion_model.pt"
 LSTM_PATH = PROCESSED_DIR / "lstm_encoder.pt"
@@ -119,6 +121,32 @@ def load_shap_data():
         return None
 
 
+@st.cache_data
+def build_qr_code(url: str) -> bytes | None:
+    """Create a PNG QR code for the dashboard URL."""
+    if not url:
+        return None
+    try:
+        import qrcode
+        from qrcode.constants import ERROR_CORRECT_M
+    except ImportError:
+        return None
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=ERROR_CORRECT_M,
+        box_size=8,
+        border=2,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#0D1117", back_color="#FFFFFF")
+
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 @st.cache_resource
 def load_fusion_artifacts(fusion_path: str, lstm_path: str):
     """Load fusion model checkpoints for the selected version."""
@@ -189,6 +217,15 @@ with st.sidebar:
         model_version = "Demo（預先計算結果）"
         _model_artifacts = None
         st.caption("模式：Demo（預先計算結果）")
+
+    st.markdown("---")
+    st.markdown("### Demo QR")
+    qr_png = build_qr_code(APP_QR_URL)
+    if qr_png is None:
+        st.info("Install the qrcode package to display the QR code.")
+    else:
+        st.image(qr_png, width=160)
+    st.caption(f"{APP_QR_LABEL}: {APP_QR_URL}")
 
     is_ensemble = False
     st.markdown("---")

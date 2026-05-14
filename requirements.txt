@@ -7,3 +7,4 @@ matplotlib
 shap
 openai>=1.0
 python-dotenv
+qrcode[pil]
