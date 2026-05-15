@@ -94,10 +94,10 @@ Text        → sentence-BERT        → 32-dim  ┘
 
 | 模態 | Encoder | 資料來源 | 現況 |
 |---|---|---|---|
-| 表格 | XGBoost Leaf Embedding | GiveMeSomeCredit 1,200筆 | ⚠️ 使用舊版小樣本 |
-| 時序 | Bi-LSTM | Lending Club 100K | ✅ 真實資料，序列相關性驗證 |
-| 圖 | GraphSAGE（2層 SAGEConv）| Cosine 相似度合成圖 | ⚠️ 非真實擔保關係 |
-| 文字 | frozen MiniLM + 投影頭 | 模板生成 5,000 筆 | ⚠️ 語意多樣性有限 |
+| 表格 | XGBoost Leaf Embedding | GiveMeSomeCredit 1,200筆 | 使用舊版小樣本 |
+| 時序 | Bi-LSTM | Lending Club 100K | 真實資料，序列相關性驗證 |
+| 圖 | GraphSAGE（2層 SAGEConv）| Cosine 相似度合成圖 | 非真實擔保關係 |
+| 文字 | frozen MiniLM + 投影頭 | 模板生成 5,000 筆 | 語意多樣性有限 |
 
 ### 時序模態升級紀錄
 
@@ -218,5 +218,5 @@ streamlit run app/streamlit_app.py
 ## 作者
 
 **Joey Wu（巫佳樺）**
-Georgia Tech OMSA | Civil Engineering → Data Science
+Georgia Tech OMSA | Data Science
 [github.com/JoeyTaipei/Credit_risk_intelligence](https://github.com/JoeyTaipei/Credit_risk_intelligence)
